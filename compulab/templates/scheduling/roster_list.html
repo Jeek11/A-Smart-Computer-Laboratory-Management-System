@@ -201,7 +201,7 @@ html[data-theme="light"] .cr-pagination span.cr-page.current{ color:#fff; }
             {% if request.user.role == 'admin' or request.user.role == 'incharge' %}
             <td class="bulk-select-col"><input type="checkbox" class="js-row-check" value="{{ roster.pk }}"></td>
             {% endif %}
-            <td><a href="{% url 'roster_detail' roster.pk %}" class="cr-name js-modal-link">{{ roster.course_code|default:roster.name }}</a></td>
+            <td><span class="cr-name">{{ roster.course_code|default:roster.name }}</span></td>
             <td>{{ roster.subject|default:"—" }}{% if roster.section %} · {{ roster.section }}{% endif %}</td>
             <td>{{ roster.instructor.get_full_name|default:"—" }}</td>
             <td>{% if roster.semester %}{{ roster.get_semester_display }}{% else %}—{% endif %}{% if roster.academic_year %} {{ roster.academic_year }}{% endif %}</td>
@@ -225,11 +225,12 @@ html[data-theme="light"] .cr-pagination span.cr-page.current{ color:#fff; }
     </div>
     {% endif %}
 
-    {% if is_paginated %}
+    {% if paginator.count %}
       <div class="cr-pagination">
         <div>
           Showing {{ page_obj.start_index }} to {{ page_obj.end_index }} of {{ paginator.count }} entries
         </div>
+        {% if is_paginated %}
         <div class="cr-pages">
           {% if page_obj.has_previous %}
             <a href="?{% if selected_q %}q={{ selected_q }}&{% endif %}{% if selected_semester %}semester={{ selected_semester }}&{% endif %}{% if selected_course %}course={{ selected_course }}&{% endif %}{% if selected_status %}status={{ selected_status }}&{% endif %}{% if selected_approval %}approval={{ selected_approval }}&{% endif %}page={{ page_obj.previous_page_number }}">&lsaquo;</a>
@@ -249,6 +250,7 @@ html[data-theme="light"] .cr-pagination span.cr-page.current{ color:#fff; }
             <span class="cr-page disabled">&rsaquo;</span>
           {% endif %}
         </div>
+        {% endif %}
       </div>
     {% endif %}
   </div>

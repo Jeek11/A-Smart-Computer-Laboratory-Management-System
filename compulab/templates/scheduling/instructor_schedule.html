@@ -142,12 +142,13 @@
   .is-metrics{ grid-template-columns:repeat(2,1fr); }
   .is-layout{ grid-template-columns:1fr; }
 }
+
 </style>
 
 <div class="page-header">
   <div>
     <h1>Scheduling</h1>
-    <div class="sub">Your reservations and requests — click a date to reserve, click a session for details</div>
+
   </div>
  <a href="{% url 'instructor_request_new' %}" class="action-btn primary js-modal-link"><svg class="btn-icon"><use href="#icon-plus"/></svg>New Reservation</a> 
 </div>
@@ -238,6 +239,14 @@
   </div>
 </div>
 
+<div class="is-modal-backdrop" id="dayListModal">
+  <div class="is-modal">
+    <button type="button" class="is-modal-close" onclick="closeDayListModal()">&times;</button>
+    <h3 id="dlDate"></h3>
+    <div id="dlList" style="display:flex; flex-direction:column; gap:6px; margin-top:10px;"></div>
+  </div>
+</div>
+
 <script>
 document.addEventListener('DOMContentLoaded', function () {
   var calEl = document.getElementById('calendar');
@@ -253,7 +262,18 @@ document.addEventListener('DOMContentLoaded', function () {
     initialView: 'dayGridMonth',
     initialDate: '{{ initial_date }}',
     height: 'auto',
-    dayMaxEvents: false,
+    dayMaxEvents: 1,
+       moreLinkClick: function (arg) {
+      openDayListModal(arg.date, arg.allSegs.map(function (seg) { return seg.event; }));
+      // FullCalendar ignores an unrecognized return value here and still
+      // renders its own default popover behind ours — actively remove it
+      // since we're showing our own custom day-list modal instead.
+      setTimeout(function () {
+        var native = document.querySelector('.fc-popover');
+        if (native) native.remove();
+      }, 0);
+      return false;
+    },
     headerToolbar: { left: 'prev,next today', center: 'title', right: 'dayGridMonth,timeGridWeek,listMonth' },
     events: events,
     dayCellDidMount: function (arg) {
@@ -286,16 +306,71 @@ document.addEventListener('DOMContentLoaded', function () {
       openAppModal('{% url "instructor_request_new" %}?date=' + info.dateStr, info.dayEl);
     },
     eventClick: function (info) {
-      var p = info.event.extendedProps;
-      document.getElementById('imSubject').textContent = p.subject;
-      document.getElementById('imLab').textContent = p.lab;
-      document.getElementById('imTime').textContent = p.time || '';
-      document.getElementById('imStatus').textContent = p.status || '';
-      document.getElementById('imCode').textContent = p.code || '—';
-      modal.classList.add('open');
+      openEventDetailModal(info.event);
     }
   });
   calendar.render();
+
+  function openEventDetailModal(event) {
+    var p = event.extendedProps;
+    document.getElementById('imSubject').textContent = p.subject;
+    document.getElementById('imLab').textContent = p.lab;
+    document.getElementById('imTime').textContent = p.time || '';
+    document.getElementById('imStatus').textContent = p.status || '';
+    document.getElementById('imCode').textContent = p.code || '—';
+    modal.classList.add('open');
+  }
+
+  // Custom "view all sessions for this day" modal — used instead of
+  // FullCalendar's own +N-more popover, which we can't force into a
+  // fixed/centered position without breaking its internal open/close
+  // state tracking (it would only work correctly the very first time).
+  var dayListModal = document.getElementById('dayListModal');
+  var dlDate = document.getElementById('dlDate');
+  var dlList = document.getElementById('dlList');
+
+  function openDayListModal(date, events) {
+    dlDate.textContent = date.toLocaleDateString(undefined, { month: 'long', day: 'numeric', year: 'numeric' });
+    dlList.innerHTML = '';
+    events.forEach(function (event) {
+      var p = event.extendedProps;
+      var row = document.createElement('button');
+      row.type = 'button';
+      row.className = 'action-btn';
+      row.style.cssText = 'width:100%; justify-content:flex-start; text-align:left; gap:8px;';
+      row.style.borderLeft = '3px solid ' + (event.backgroundColor || 'var(--accent)');
+      row.innerHTML = '<strong>' + (p.time || '') + '</strong>&nbsp; ' + (p.subject || event.title);
+      row.addEventListener('click', function () {
+        closeDayListModal();
+        openEventDetailModal(event);
+      });
+      dlList.appendChild(row);
+    });
+    dayListModal.classList.add('open');
+  }
+
+    window.closeDayListModal = function () {
+    dayListModal.classList.remove('open');
+  };
+  dayListModal.addEventListener('click', function (e) {
+    if (e.target === dayListModal) closeDayListModal();
+  });
+
+  // FullCalendar still inserts its own default "+N more" popover into
+  // the DOM even when moreLinkClick returns false — we show our own
+  // custom day-list modal instead, so strip out the native one the
+  // instant it appears (rather than guessing at a setTimeout delay,
+  // which was unreliable — FullCalendar's own render commit can land
+  // after ours).
+  new MutationObserver(function (mutations) {
+    mutations.forEach(function (m) {
+      m.addedNodes.forEach(function (node) {
+        if (node.nodeType === 1 && node.classList && node.classList.contains('fc-popover')) {
+          node.remove();
+        }
+      });
+    });
+  }).observe(document.body, { childList: true, subtree: true });
 
   modal.addEventListener('click', function (e) { if (e.target === modal) modal.classList.remove('open'); });
 });

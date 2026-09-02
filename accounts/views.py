@@ -9,17 +9,17 @@ from django.shortcuts import redirect, get_object_or_404, render
 from django.http import JsonResponse
 from django.db.models import Q, Value
 from django.db.models.functions import Concat
-from django.views.generic import TemplateView, ListView, CreateView, UpdateView, DeleteView, FormView
+from django.views.generic import TemplateView, ListView, CreateView, UpdateView, DeleteView, DetailView, FormView
 from django.contrib.auth.mixins import LoginRequiredMixin
 from django.contrib.auth.views import LoginView, PasswordResetView, PasswordResetConfirmView
-from django.contrib.auth import get_user_model
+from django.contrib.auth import get_user_model, update_session_auth_hash
 from django.contrib.auth.decorators import login_required
 from django.contrib import messages
 from django.core.exceptions import PermissionDenied
 from django.urls import reverse_lazy, reverse
-from accounts.mixins import RoleRequiredMixin, ModalFormMixin, is_modal_request, bulk_delete
+from accounts.mixins import RoleRequiredMixin, ModalFormMixin, ModalDetailMixin, is_modal_request, bulk_delete
 from accounts.models import ActivityLog
-from accounts.forms import AdminUserCreateForm, AdminUserUpdateForm, AdminSetPasswordForm, ProfileUpdateForm, StudentImportForm
+from accounts.forms import AdminUserCreateForm, AdminUserUpdateForm, AdminSetPasswordForm, ProfileUpdateForm, ProfilePasswordChangeForm, StudentImportForm, SetPasswordOnVerifyForm
 from accounts.constants import DEPARTMENT_CHOICES, department_year_levels_json, year_level_choices_for, department_name
 from django.core.cache import cache
 from notifications import services as notify_service
@@ -107,10 +107,25 @@ class CompulabPasswordResetView(PasswordResetView):
     # get_context_data(), so the logo/header photo have to be injected
     # here instead, the same way send_verification_email() builds them
     # by hand for the account-verification email.
-    extra_email_context = {
-        'logo_url': f'{settings.SITE_URL}{static("img/logo.jpg")}',
-        'header_bg_url': f'{settings.SITE_URL}{static("img/login-bg.jpg")}',
-    }
+    #
+    # This also has to override 'domain' and 'protocol' (PasswordResetForm.
+    # save() lets extra_email_context win over its own defaults for any
+    # matching keys). Left alone, 'domain' comes from the Sites framework's
+    # Site.objects.get_current() — and since nothing in this project ever
+    # updates that Site record, it stays at Django's placeholder value of
+    # "example.com" forever, which is why the emailed reset link pointed
+    # there instead of somewhere reachable. Using settings.SITE_DOMAIN
+    # instead is the same fix send_verification_email() already applies
+    # for the account-verification email, for the same reason: links need
+    # to work from a phone checking Gmail, not just from this computer.
+    @property
+    def extra_email_context(self):
+        return {
+            'domain': settings.SITE_DOMAIN,
+            'protocol': 'https' if self.request.is_secure() else 'http',
+            'logo_url': f'{settings.SITE_URL}{static("img/logo.jpg")}',
+            'header_bg_url': f'{settings.SITE_URL}{static("img/login-bg.jpg")}',
+        }
 
 
 class CompulabPasswordResetConfirmView(PasswordResetConfirmView):
@@ -123,7 +138,10 @@ class CompulabPasswordResetConfirmView(PasswordResetConfirmView):
 class ProfileView(LoginRequiredMixin, ModalFormMixin, UpdateView):
 
     """Lets any logged-in user (admin, in-charge, or instructor) update
-    their own name, email, and profile picture from the navbar avatar."""
+    their own name and profile picture from the navbar avatar, and — on
+    the same page — change their own login password. The two forms are
+    independent and distinguished by the hidden `form_action` field each
+    one posts: submitting one never touches the other's fields."""
     model = User
     form_class = ProfileUpdateForm
     template_name = 'accounts/profile.html'
@@ -132,9 +150,52 @@ class ProfileView(LoginRequiredMixin, ModalFormMixin, UpdateView):
     def get_object(self, queryset=None):
         return self.request.user
 
+    def get_context_data(self, **kwargs):
+        ctx = super().get_context_data(**kwargs)
+        # Only build a fresh (unbound) password form when the password
+        # branch below hasn't already supplied one with validation errors
+        # to redisplay.
+        ctx.setdefault('password_form', ProfilePasswordChangeForm(user=self.request.user))
+        return ctx
+
     def form_valid(self, form):
         messages.success(self.request, 'Profile updated.')
         return super().form_valid(form)
+
+    def post(self, request, *args, **kwargs):
+        if request.POST.get('form_action') == 'change_password':
+            self.object = self.get_object()
+            password_form = ProfilePasswordChangeForm(request.POST, user=request.user)
+            if password_form.is_valid():
+                password_form.save()
+                # Django's default behavior logs out every session tied to
+                # this account (including the current one) the moment its
+                # password hash changes — this keeps the tab that just
+                # submitted the form logged in, same as the "forgot
+                # password" reset flow does via CompulabPasswordResetConfirmView.
+                update_session_auth_hash(request, request.user)
+                notify_service.send_password_changed_email(request.user)
+                ActivityLog.objects.create(
+                    actor=request.user,
+                    action='change_password',
+                    target_identifier=request.user.email or request.user.id_number,
+                    details=f"{request.user.display_name} changed their own password.",
+                )
+                messages.success(request, 'Password updated.')
+                if is_modal_request(request):
+                    return JsonResponse({'success': True, 'redirect': reverse('profile')})
+                return redirect('profile')
+            # Redisplay the page with the personal-info form untouched and
+            # the password form showing its errors.
+            context = self.get_context_data(
+                form=ProfileUpdateForm(instance=request.user),
+                password_form=password_form,
+            )
+            response = self.render_to_response(context)
+            if is_modal_request(request):
+                response.status_code = 200
+            return response
+        return super().post(request, *args, **kwargs)
 
 
 # sends each role to their own dashboard after login
@@ -650,11 +711,54 @@ def verify_email(request, uidb64, token):
     except (TypeError, ValueError, OverflowError, User.DoesNotExist):
         user = None
 
-    if user is not None and default_token_generator.check_token(user, token):
-        user.email_verified = True
-        user.save(update_fields=['email_verified'])
-        return render(request, 'accounts/verify_email_result.html', {'success': True})
-    return render(request, 'accounts/verify_email_result.html', {'success': False})
+    if user is None or not default_token_generator.check_token(user, token):
+        return render(request, 'accounts/verify_email_result.html', {'success': False})
+
+    if not user.has_usable_password():
+        # First-time activation for a Lab In-Charge/Instructor account
+        # created with no password (see AdminUserCreateForm.save()) — the
+        # account owner sets their OWN password here instead of the admin
+        # who created the account ever choosing it. The token is already
+        # confirmed valid above, so it's safe to act on GET too (show the
+        # form) — the actual state change only happens on POST.
+        if request.method == 'POST':
+            form = SetPasswordOnVerifyForm(user, request.POST)
+            if form.is_valid():
+                user.set_password(form.cleaned_data['password1'])
+                user.email_verified = True
+                user.save(update_fields=['password', 'email_verified'])
+                return render(request, 'accounts/verify_email_result.html', {'success': True, 'password_was_set': True})
+        else:
+            form = SetPasswordOnVerifyForm(user)
+        return render(request, 'accounts/set_password_on_verify.html', {
+            'form': form,
+            'target_user': user,
+        })
+
+    # Account already has a usable password — either the normal Admin
+    # case (which still sets its own password at creation), or this is an
+    # email-CHANGE re-verification (see AdminUserUpdateForm.save()) where
+    # the account already had a password before the email changed. Either
+    # way, no password step needed — just mark the (possibly new) email
+    # as verified.
+    user.email_verified = True
+    user.save(update_fields=['email_verified'])
+    return render(request, 'accounts/verify_email_result.html', {'success': True})
+
+
+# read-only profile popup opened by clicking a user's avatar on the Users
+# dashboard — lets Admin check an Instructor/Lab In-Charge/Admin account's
+# details without dropping into the edit form. Students are excluded: they
+# don't log into the dashboard and carry no extra profile info beyond
+# what's already on the Users table row.
+class UserDetailView(RoleRequiredMixin, ModalDetailMixin, DetailView):
+    allowed_roles = ['admin']
+    template_name = 'accounts/user_detail.html'
+    model = User
+    context_object_name = 'target_user'
+
+    def get_queryset(self):
+        return User.objects.exclude(role='student')
 
 
 # admin edit existing user
@@ -670,6 +774,22 @@ class UserUpdateView(RoleRequiredMixin, ModalFormMixin, UpdateView):
         ctx = super().get_context_data(**kwargs)
         ctx['department_year_levels_json'] = json.dumps(department_year_levels_json())
         return ctx
+
+    def form_valid(self, form):
+        response = super().form_valid(form)
+        # See AdminUserUpdateForm.save() — email_changed is only set True
+        # when the email actually changed to something new (not on every
+        # save). The old verification doesn't carry over to a new address,
+        # so a fresh link has to go out, or this account would be stuck
+        # unable to log in (email_verified was just reset to False).
+        if getattr(form, 'email_changed', False) and self.object.email:
+            send_verification_email(self.request, self.object)
+            messages.info(
+                self.request,
+                f'{self.object.display_name}\'s email was changed — a verification link was sent to the new address. '
+                f'This account can\'t log in until it\'s verified.'
+            )
+        return response
 
 
 # attendance module for instructor: (1) generate a per-day attendance

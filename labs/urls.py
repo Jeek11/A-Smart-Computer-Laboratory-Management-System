@@ -28,6 +28,10 @@ urlpatterns = [
     path('pc-status/api/', views.pc_status_api, name='pc_status_api'),
     path('pc-status/refresh/', views.refresh_pc_status_view, name='pc_status_refresh'),
     path('pc-status/<int:pk>/force-release/', views.pc_force_release, name='pc_force_release'),
+    path('pc-status/<int:pk>/shutdown/', views.pc_shutdown, name='pc_shutdown'),
+    path('pc-status/<int:pk>/restart/', views.pc_restart, name='pc_restart'),
+    path('pc-status/<int:pk>/lock/', views.pc_lock, name='pc_lock'),
+    path('pc-status/bulk-power/', views.pc_bulk_power_action, name='pc_bulk_power_action'),
     path('pc-status/export/', reports.export_pc_status_report, name='pc_status_export'),
     path('pc-status/override-checkin/', views.OverrideCheckInView.as_view(), name='override_checkin'),
     path('pc-status/manual-unlock/', views.ManualUnlockView.as_view(), name='manual_unlock'),
@@ -52,6 +56,7 @@ urlpatterns = [
 
     path('manage/pc/add/', views.PCCreateView.as_view(), name='pc_create'),
     path('manage/pc/import/', views.PCImportView.as_view(), name='pc_import'),
+    path('manage/pc/import/template/', views.pc_import_template, name='pc_import_template'),
     path('manage/pc/<int:pk>/edit/', views.PCEditView.as_view(), name='pc_edit'),
     path('manage/pc/<int:pk>/delete/', views.PCDeleteView.as_view(), name='pc_delete'),
 

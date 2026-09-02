@@ -121,6 +121,7 @@
 .ld-table tr:hover td{background:rgba(255,255,255,0.02);}
 .ld-dot{display:inline-block; width:7px; height:7px; border-radius:50%; margin-right:6px;}
 .ld-pill{font-size:10.5px; font-weight:700; padding:4px 10px; border-radius:6px; white-space:nowrap; display:inline-block;}
+.lab-closed-pill{font-size:9.5px; font-weight:700; padding:2px 7px; border-radius:5px; white-space:nowrap; display:inline-block; background:var(--ld-red); color:#fff; text-transform:uppercase; letter-spacing:.03em; vertical-align:middle;}
 .ld-pill.online{background:var(--ld-green); color:#0a0e12;}
 .ld-pill.in_use{background:var(--ld-orange); color:#0a0e12;}
 .ld-pill.offline{background:var(--ld-red); color:#fff;}
@@ -383,7 +384,6 @@ html[data-theme="light"] .ld-page-btn.active{ color:#fff; }
           </a>
         </div>
         <div style="margin-top:8px; font-size:11px; color:var(--ld-faint); line-height:1.5;">
-          Wake-on-LAN, remote shutdown and restart aren't wired up yet — they'd need an always-on agent on each PC. Ask if you'd like that built next.
         </div>
       </div>
   </div>
@@ -402,10 +402,29 @@ html[data-theme="light"] .ld-page-btn.active{ color:#fff; }
         </div>
       {% endif %}
       {% if page_obj.object_list %}
+        <div id="bulkPowerBar" style="display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin-bottom:10px;">
+          <span id="bulkSelectedCount" style="font-size:12px; color:var(--ld-dim);">0 selected</span>
+          <button type="button" class="ld-btn" onclick="submitBulkPower('lock')">
+            <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.8" style="vertical-align:-2px; margin-right:3px;"><use href="#icon-lock"/></svg> Lock Selected
+          </button>
+          <button type="button" class="ld-btn" onclick="submitBulkPower('restart')">
+            <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.8" style="vertical-align:-2px; margin-right:3px;"><use href="#icon-refresh"/></svg> Restart Selected
+          </button>
+          <button type="button" class="ld-btn" style="color:var(--ld-red);" onclick="submitBulkPower('shutdown')">
+            <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.8" style="vertical-align:-2px; margin-right:3px;"><use href="#icon-power"/></svg> Shutdown Selected
+          </button>
+          <span style="font-size:11px; color:var(--ld-faint);">Tip: check the header box to select every PC on this page.</span>
+        </div>
+        <form method="post" action="{% url 'pc_bulk_power_action' %}" id="bulkPowerForm">
+          {% csrf_token %}
+          <input type="hidden" name="action" id="bulkActionField" value="">
+          <input type="hidden" name="pc_ids" id="bulkPcIdsField" value="">
+        </form>
         <div class="ld-table-bleed">
         <table class="ld-table">
           <thead>
             <tr>
+              <th><input type="checkbox" id="selectAllPCs" onclick="toggleAllPCs(this)"></th>
               <th>PC ID</th><th>Laboratory</th><th>Status</th><th>Current User</th>
               <th>Reservation Type</th><th>Login Time</th><th>Duration</th><th>Last Active</th><th>Actions</th>
             </tr>
@@ -413,8 +432,9 @@ html[data-theme="light"] .ld-page-btn.active{ color:#fff; }
           <tbody>
             {% for pc in page_obj.object_list %}
               <tr data-pc="{{ pc.pc_id }}">
+                <td>{% if pc.ip_address %}<input type="checkbox" class="pc-select-checkbox" value="{{ pc.pk }}" onchange="updateBulkCount()">{% endif %}</td>
                 <td>{{ pc.pc_id }}</td>
-                <td>{{ pc.lab.name }}</td>
+                <td>{{ pc.lab.name }}{% if pc.lab_id in closed_lab_ids %} <span class="lab-closed-pill" title="Outside this lab's operating hours">Closed</span>{% endif %}</td>
                 <td><span class="ld-pill {{ pc.status }}" data-role="status-pill">{{ pc.get_status_display }}</span></td>
                 <td data-role="current-user">{% if pc.current_user %}{{ pc.current_user.display_name }}{% elif pc.current_guest_name %}{{ pc.current_guest_name }} <span class="helptext">(Guest)</span>{% else %}—{% endif %}</td>
                 <td>{{ pc.reservation_type_label|default:"—" }}</td>
@@ -422,15 +442,31 @@ html[data-theme="light"] .ld-page-btn.active{ color:#fff; }
                 <td>{% if pc.login_time %}{{ pc.login_time|timesince }}{% else %}—{% endif %}</td>
                 <td>{{ pc.last_active|timesince|default:"—" }}{% if pc.last_active %} ago{% endif %}</td>
                 <td style="white-space:nowrap;">
-                  <a href="{% url 'pc_activity_log' %}?pc={{ pc.pk }}" class="ld-btn" style="padding:5px 10px; font-size:11.5px;">View</a>
-                  <a href="{% url 'pc_update' pc.pk %}" class="ld-btn js-modal-link" style="padding:5px 10px; font-size:11.5px;">Update</a>
+                  <a href="{% url 'pc_activity_log' %}?pc={{ pc.pk }}" class="ld-btn" style="padding:5px 10px; font-size:11.5px;">
+                    <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.8" style="vertical-align:-2px; margin-right:3px;"><use href="#icon-eye"/></svg> View
+                  </a>
+                  <a href="{% url 'pc_update' pc.pk %}" class="ld-btn js-modal-link" style="padding:5px 10px; font-size:11.5px;">
+                    <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.8" style="vertical-align:-2px; margin-right:3px;"><use href="#icon-save"/></svg> Update
+                  </a>
                   {% if request.user.role == 'admin' %}
-                    <a href="{% url 'pc_edit' pc.pk %}" class="ld-btn js-modal-link" style="padding:5px 10px; font-size:11.5px;">Edit</a>
+                    <a href="{% url 'pc_edit' pc.pk %}" class="ld-btn js-modal-link" style="padding:5px 10px; font-size:11.5px;">
+                      <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.8" style="vertical-align:-2px; margin-right:3px;"><use href="#icon-edit"/></svg> Edit
+                    </a>
                   {% endif %}
                   {% if pc.status == 'in_use' %}
                     <form method="post" action="{% url 'pc_force_release' pc.pk %}" style="display:inline;" onsubmit="return confirm('Release {{ pc.pc_id }}? This clears its current user/session — use this if it\'s stuck showing in use when nobody is actually on it.');">
                       {% csrf_token %}
-                      <button type="submit" class="ld-btn" style="padding:5px 10px; font-size:11.5px; color:var(--ld-red);">Force Release</button>
+                      <button type="submit" class="ld-btn" style="padding:5px 10px; font-size:11.5px; color:var(--ld-red);">
+                        <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.8" style="vertical-align:-2px; margin-right:3px;"><use href="#icon-unlock"/></svg> Force Release
+                      </button>
+                    </form>
+                  {% endif %}
+                  {% if pc.ip_address and pc.status == 'in_use' %}
+                    <form method="post" action="{% url 'pc_lock' pc.pk %}" style="display:inline;" onsubmit="return confirm('Lock {{ pc.pc_id }} now? This re-shows its lock screen and ends the current session.');">
+                      {% csrf_token %}
+                      <button type="submit" class="ld-btn" style="padding:5px 10px; font-size:11.5px;">
+                        <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.8" style="vertical-align:-2px; margin-right:3px;"><use href="#icon-lock"/></svg> Lock
+                      </button>
                     </form>
                   {% endif %}
                 </td>
@@ -569,6 +605,53 @@ function confirmAndCheckPcStatusNow(form) {
 
 function themeVarSafe(name) {
   return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+}
+
+// ---- Bulk power actions (Lock / Restart / Shutdown Selected) ----
+function getSelectedPcIds() {
+  return Array.from(document.querySelectorAll('.pc-select-checkbox:checked')).map(function (cb) { return cb.value; });
+}
+
+function updateBulkCount() {
+  var el = document.getElementById('bulkSelectedCount');
+  if (el) el.textContent = getSelectedPcIds().length + ' selected';
+}
+
+function toggleAllPCs(master) {
+  document.querySelectorAll('.pc-select-checkbox').forEach(function (cb) { cb.checked = master.checked; });
+  updateBulkCount();
+}
+
+function submitBulkPower(action) {
+  var ids = getSelectedPcIds();
+  if (ids.length === 0) {
+    Swal.fire({
+      title: 'No PCs selected',
+      text: 'Check at least one PC first, or check the header box to select all.',
+      icon: 'info',
+      background: (typeof theme !== 'undefined' ? theme.background : undefined),
+      color: (typeof theme !== 'undefined' ? theme.color : undefined),
+    });
+    return;
+  }
+  var verbLabel = action === 'lock' ? 'Lock' : (action === 'restart' ? 'Restart' : 'Shut down');
+  var extra = action === 'lock' ? '' : ' They will ' + verbLabel.toLowerCase() + ' in about 30 seconds.';
+  Swal.fire({
+    title: verbLabel + ' ' + ids.length + ' PC' + (ids.length === 1 ? '' : 's') + '?',
+    text: 'Anyone currently using them will lose unsaved work.' + extra,
+    icon: 'warning',
+    showCancelButton: true,
+    confirmButtonText: 'Yes, ' + verbLabel.toLowerCase(),
+    cancelButtonText: 'Cancel',
+    confirmButtonColor: themeVarSafe('--ld-red') || '#d33',
+    background: (typeof theme !== 'undefined' ? theme.background : undefined),
+    color: (typeof theme !== 'undefined' ? theme.color : undefined),
+  }).then(function (result) {
+    if (!result.isConfirmed) return;
+    document.getElementById('bulkActionField').value = action;
+    document.getElementById('bulkPcIdsField').value = ids.join(',');
+    document.getElementById('bulkPowerForm').submit();
+  });
 }
 </script>
 

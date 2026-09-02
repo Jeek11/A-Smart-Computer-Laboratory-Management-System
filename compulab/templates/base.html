@@ -337,7 +337,7 @@
     .pill-assigned { background: var(--topbar-accent-tint); color: var(--topbar-accent); }
     .pill-resolved, .pill-approved, .pill-online, .pill-good, .pill-low, .pill-activate, .pill-register, .pill-operational { background: var(--green-dim); color: var(--green); }
     .pill-declined, .pill-retired { background: rgba(139,152,163,0.14); color: var(--text-dim); }
-    .pill-admin, .pill-incharge, .pill-instructor, .pill-student, .pill-fair, .pill-reset_password, .pill-pc_unlock { background: var(--topbar-accent-tint); color: var(--topbar-accent); }
+    .pill-admin, .pill-incharge, .pill-instructor, .pill-student, .pill-fair, .pill-reset_password, .pill-change_password, .pill-pc_unlock { background: var(--topbar-accent-tint); color: var(--topbar-accent); }
 
     .form-group { margin-bottom: 16px; }
     .form-label { display: block; font-size: 12px; font-weight: 500; color: var(--text-dim); margin-bottom: 6px; }
@@ -877,10 +877,20 @@ document.addEventListener('click', function (e) {
   var trigger = e.target.closest('.js-modal-link');
   if (trigger) {
     e.preventDefault();
-    openAppModal(trigger.getAttribute('href'), trigger);
+    var hrefAttr = trigger.getAttribute('href');
+    // Resolve relative hrefs (e.g. "?page=2" pagination links inside
+    // loaded modal content, like a roster detail's session-history
+    // pager) against the URL the CURRENT modal content was fetched
+    // from — not the outer page the modal was opened from — otherwise
+    // a relative link resolves against the wrong page (e.g. the roster
+    // LIST url instead of that specific roster's detail url) and hits
+    // an unrelated/mismatched view.
+    var resolvedUrl = (appModalBackdrop.classList.contains('open') && appModalSourceUrl)
+      ? new URL(hrefAttr, appModalSourceUrl).href
+      : hrefAttr;
+    openAppModal(resolvedUrl, trigger);
   }
 });
-
 appModalBackdrop.addEventListener('click', function (e) {
   if (e.target === appModalBackdrop) closeAppModal();
 });

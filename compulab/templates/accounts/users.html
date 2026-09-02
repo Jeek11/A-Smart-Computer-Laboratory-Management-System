@@ -279,9 +279,25 @@ html[data-theme="light"] .um-pill.student{ color:#fff; }
                 <td>{{ forloop.counter0|add:page_obj.start_index }}</td>
                 <td>
                   <div class="um-name-cell">
-                    <div class="um-avatar ic-{% if u.role == 'admin' %}blue{% elif u.role == 'incharge' %}purple{% elif u.role == 'instructor' %}orange{% else %}gold{% endif %}">
-                      {{ u.first_name|first|default:u.display_name|first|upper }}
+                    {% if u.role != 'student' %}
+                    <a href="{% url 'user_detail' u.pk %}" class="js-modal-link" title="View profile" style="display:block; line-height:0; text-decoration:none; flex-shrink:0;">
+                      <div class="um-avatar ic-{% if u.role == 'admin' %}blue{% elif u.role == 'incharge' %}purple{% else %}orange{% endif %}" style="overflow:hidden; cursor:pointer;">
+                        {% if u.avatar %}
+                          <img src="{{ u.avatar.url }}" alt="" style="width:100%; height:100%; object-fit:cover; border-radius:50%;">
+                        {% else %}
+                          {{ u.first_name|first|default:u.display_name|first|upper }}
+                        {% endif %}
+                      </div>
+                    </a>
+                    {% else %}
+                    <div class="um-avatar ic-gold">
+                      {% if u.avatar %}
+                        <img src="{{ u.avatar.url }}" alt="" style="width:100%; height:100%; object-fit:cover; border-radius:50%;">
+                      {% else %}
+                        {{ u.first_name|first|default:u.display_name|first|upper }}
+                      {% endif %}
                     </div>
+                    {% endif %}
                     <div>
                       <div class="um-name-main">{{ u.display_name }}</div>
                       

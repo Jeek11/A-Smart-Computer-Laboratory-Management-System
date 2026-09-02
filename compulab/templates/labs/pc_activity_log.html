@@ -110,6 +110,7 @@
   </div>
 </div>
 
+<div id="palStatsRoot">
 <div class="pal-stats">
   <div class="metric with-icon">
     <div class="metric-icon ic-green">
@@ -166,6 +167,7 @@
     </div>
   </div>
 </div>
+</div>
 
 <div class="card">
   <form method="get" class="pal-filters-grid">
@@ -191,6 +193,8 @@
       <label class="form-label" for="student">User</label>
       <select name="student" id="student" class="form-control">
         <option value="">All Users</option>
+        <option value="guest" {% if selected_student == 'guest' %}selected{% endif %}>Guest (walk-in)</option>
+        <option value="override" {% if selected_student == 'override' %}selected{% endif %}>Override</option>
         {% for s in all_students %}
           <option value="{{ s.pk }}" {% if selected_student == s.pk|stringformat:"s" %}selected{% endif %}>{{ s.display_name }} ({{ s.get_role_display }})</option>
         {% endfor %}
@@ -214,13 +218,14 @@
       <input type="text" name="q" id="q" class="form-control" placeholder="PC ID, user name, application…" value="{{ search_query }}">
     </div>
     <div class="pal-filters-actions" style="grid-column: 1 / -1;">
-      {% if filtered %}<a href="{% url 'pc_activity_log' %}" class="action-btn"><svg class="btn-icon"><use href="#icon-refresh"/></svg> Reset</a>{% endif %}
       <a href="{% url 'pc_activity_log' %}" class="action-btn small"><svg class="btn-icon"><use href="#icon-x"/></svg> Clear All Filters</a>
       <button type="submit" class="action-btn primary"><svg class="btn-icon"><use href="#icon-filter"/></svg> Filter</button>
     </div>
   </form>
 </div>
 
+<script src="{% static 'js/dashboard.js' %}"></script>
+<div id="palMainRoot">
 <div class="pal-layout">
   <div class="pal-main">
     <div class="card">
@@ -347,7 +352,7 @@
         </div>
         <div class="pal-detail-row">
           <span class="pal-detail-label">Session Type</span>
-          <span class="pal-detail-val">{% if selected_session.scheduling_session %}Regular Session{% else %}Walk-in / Unscheduled{% endif %}</span>
+          <span class="pal-detail-val">{% if selected_session.via_override %}Override{% elif selected_session.scheduling_session %}Regular Session{% else %}Walk-in / Unscheduled{% endif %}</span>
         </div>
         <div class="pal-detail-row">
           <span class="pal-detail-label">Record Source</span>
@@ -371,9 +376,8 @@
         </div>
 
         <div style="display:flex; gap:8px; margin-top:14px; flex-wrap:wrap;">
-          <a href="{% url 'export_pc_activity_log' %}?pc={{ selected_session.pc.pk }}&day={{ selected_session.login_time|date:'Y-m-d' }}&format=pdf" class="action-btn small primary"><svg class="btn-icon"><use href="#icon-eye"/></svg> View Full Session Report</a>
-          <a href="{% url 'export_pc_activity_log' %}?pc={{ selected_session.pc.pk }}&day={{ selected_session.login_time|date:'Y-m-d' }}&format=excel" class="action-btn small"><svg class="btn-icon"><use href="#icon-excel-doc"/></svg> Export Session</a>
-          <button type="button" class="action-btn small" onclick="window.print();"><svg class="btn-icon"><use href="#icon-print"/></svg> Print</button>
+          <a href="{% url 'export_pc_activity_log' %}?session={{ selected_session.key }}&format=pdf" class="action-btn small primary"><svg class="btn-icon"><use href="#icon-eye"/></svg> View Full Session Report</a>
+          <a href="{% url 'export_pc_activity_log' %}?session={{ selected_session.key }}&format=excel" class="action-btn small"><svg class="btn-icon"><use href="#icon-excel-doc"/></svg> Export Session</a>
         </div>
       {% else %}
         <p class="empty">No session selected yet — click the eye icon on any row in the Activity Timeline.</p>
@@ -419,7 +423,6 @@
   </div>
 </div>
 
-<script src="{% static 'js/dashboard.js' %}"></script>
 <script>
 (function() {
   if (typeof Chart === 'undefined') return;
@@ -445,71 +448,48 @@
   });
 })();
 </script>
+</div>
 
 {% endblock %}
 
 {% block extra_scripts %}
 <script>
 // ---------------------------------------------------------------------
-// Auto-refresh: reloads the PC Activity Log page periodically so new
-// activity shows up without a manual F5. Skips a refresh whenever
-// reloading right now would be disruptive:
-//   - the app-wide modal (openAppModal) is open
-//   - a SweetAlert2 popup/toast is open
-//   - the user is actively typing/selecting in a form field
+// Auto-refresh: pulls fresh data periodically so new PC activity shows
+// up without a manual F5 — WITHOUT a full page reload/navigation. A real
+// reload was the cause of the visible "jump"/flash Yan noticed: white
+// flash while the browser re-requests everything, then a snap back to
+// the top of the page before scroll got restored.
 //
-// The reload itself would normally snap the page back to the top,
-// undoing any scrolling — so the current scroll position is saved right
-// before reloading and restored right after the fresh page loads.
+// Instead, this fetches the SAME url (so it keeps whatever filters are
+// active in the querystring), parses the returned HTML, and swaps in
+// just the two data containers that actually change:
+//   #palStatsRoot  — the 6 stat cards at the top
+//   #palMainRoot   — the timeline table, pagination, session details
+//                    side panel, and the "Most Used Applications" chart
+// The filter form itself (labs/PC/user dropdowns, date, search box) is
+// deliberately OUTSIDE both containers, so it's never touched — nothing
+// to reset or flicker while someone is mid-filter.
 //
-// This has to cover BOTH kinds of reload:
-//   - the periodic auto-refresh below (window.location.reload() on a timer)
-//   - a manual refresh (F5 / Ctrl+R / the browser's own reload button)
-// A manual refresh never runs our setInterval callback, so the scroll
-// position is saved on 'beforeunload' instead — that fires right before
-// any reload, auto or manual, giving one save path for both.
+// Chart.js needs a bit of extra care: swapping #palMainRoot's innerHTML
+// replaces the <canvas> element the old chart was drawn on, so the old
+// Chart instance would be pointing at a dead canvas. The inline script
+// block that builds that chart lives INSIDE #palMainRoot for exactly
+// this reason — re-executing it after every swap (see runScripts below)
+// rebuilds the chart against the new canvas each time.
 // ---------------------------------------------------------------------
 (function () {
   var AUTO_REFRESH_MS = 15000; // 15 seconds
-  var SCROLL_KEY = 'compulabPalScrollY:' + window.location.pathname + window.location.search;
   var lastScrollAt = 0;
 
   // The page layout (base.html) is a fixed-height flex shell — `.app` is
   // pinned to 100vh and it's the inner `.content` panel that actually
-  // scrolls (overflow-y: auto), not the window/document. window.scrollY
-  // stays 0 the whole time, so we have to read/set scrollTop on
-  // `.content` instead of using window.scrollY / window.scrollTo.
+  // scrolls (overflow-y: auto), not the window/document.
   var scrollEl = document.querySelector('.content') || document.scrollingElement || document.documentElement;
-
-  function getScrollPos() {
-    return scrollEl === document.scrollingElement || scrollEl === document.documentElement
-      ? window.scrollY
-      : scrollEl.scrollTop;
-  }
-  function setScrollPos(y) {
-    if (scrollEl === document.scrollingElement || scrollEl === document.documentElement) {
-      window.scrollTo(0, y);
-    } else {
-      scrollEl.scrollTop = y;
-    }
-  }
-
-  // Tell the browser not to attempt its own scroll-position restoration
-  // on reload — it can otherwise race with our own restore below and
-  // reset the scroll to 0 partway through. Safe now that beforeunload
-  // covers manual refreshes too, so we're not losing native restore
-  // without replacing it.
-  if ('scrollRestoration' in history) {
-    history.scrollRestoration = 'manual';
-  }
 
   scrollEl.addEventListener('scroll', function () {
     lastScrollAt = Date.now();
   }, { passive: true });
-
-  window.addEventListener('beforeunload', function () {
-    sessionStorage.setItem(SCROLL_KEY, String(getScrollPos()));
-  });
 
   function isUserBusy() {
     if (typeof appModalBackdrop !== 'undefined' && appModalBackdrop && appModalBackdrop.classList.contains('open')) return true;
@@ -522,46 +502,51 @@
       }
     }
     // Skip a refresh if the user scrolled within the last couple of
-    // seconds — mid-scroll is exactly when a reload feels most jarring.
+    // seconds — mid-scroll is exactly when a swap feels most jarring.
     if (Date.now() - lastScrollAt < 2000) return true;
     return false;
   }
 
-  // Restore whatever scroll position was saved right before the last
-  // auto-refresh reload (if any), then clear it so a fresh/manual visit
-  // to this page later starts at the top as normal.
-  //
-  // This has to wait for the WHOLE page to finish loading (images,
-  // fonts, stylesheets) — not just DOM parsing — because the page isn't
-  // tall enough yet for the browser to scroll this far down until
-  // everything has actually rendered. Restoring too early gets silently
-  // clamped back near the top. Two rAF passes after 'load' give the
-  // browser a couple of extra paint frames to settle the final layout
-  // (e.g. webfont swap, Chart.js canvas sizing) before we scroll.
-  var savedScrollY = sessionStorage.getItem(SCROLL_KEY);
-  if (savedScrollY !== null) {
-    sessionStorage.removeItem(SCROLL_KEY);
-    var targetY = parseInt(savedScrollY, 10) || 0;
-    var restoreScroll = function () {
-      requestAnimationFrame(function () {
-        requestAnimationFrame(function () {
-          setScrollPos(targetY);
-        });
-      });
-    };
-    if (document.readyState === 'complete') {
-      restoreScroll();
-    } else {
-      window.addEventListener('load', restoreScroll);
-    }
+  // Re-runs any <script> tags found inside a freshly-swapped container.
+  // Scripts inserted via innerHTML don't execute on their own — this
+  // clones each one into a brand-new <script> element (which DOES run)
+  // and swaps it in, so the Chart.js init block fires again.
+  function runScripts(container) {
+    Array.prototype.slice.call(container.querySelectorAll('script')).forEach(function (oldScript) {
+      var newScript = document.createElement('script');
+      for (var i = 0; i < oldScript.attributes.length; i++) {
+        var attr = oldScript.attributes[i];
+        newScript.setAttribute(attr.name, attr.value);
+      }
+      newScript.textContent = oldScript.textContent;
+      oldScript.parentNode.replaceChild(newScript, oldScript);
+    });
   }
 
-  setInterval(function () {
+  function swap(id, newDoc) {
+    var oldEl = document.getElementById(id);
+    var newEl = newDoc.getElementById(id);
+    if (!oldEl || !newEl) return;
+    oldEl.innerHTML = newEl.innerHTML;
+    runScripts(oldEl);
+  }
+
+  function refresh() {
     if (isUserBusy()) return;
-    // No need to save here anymore — 'beforeunload' above will fire and
-    // save the scroll position as soon as reload() actually navigates.
-    window.location.reload();
-  }, AUTO_REFRESH_MS);
+    fetch(window.location.href, { headers: { 'X-Requested-With': 'XMLHttpRequest' } })
+      .then(function (res) { return res.ok ? res.text() : null; })
+      .then(function (html) {
+        if (!html) return;
+        var newDoc = new DOMParser().parseFromString(html, 'text/html');
+        swap('palStatsRoot', newDoc);
+        swap('palMainRoot', newDoc);
+      })
+      .catch(function (err) {
+        console.error('PC activity log refresh failed:', err);
+      });
+  }
+
+  setInterval(refresh, AUTO_REFRESH_MS);
 })();
 </script>
 {% endblock %}

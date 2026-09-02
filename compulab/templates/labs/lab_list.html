@@ -279,14 +279,7 @@
           <svg viewBox="0 0 24 24" fill="none"><path d="M12 15V3m0 12-4-4m4 4 4-4M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
           Import Computers
         </a>
-        <form method="post" action="{% url 'pc_status_refresh' %}" style="margin:0;"
-              onsubmit="event.preventDefault(); compulabConfirmSubmit(this, {title: 'Check all PC status now?', text: 'This will ping every PC across all labs right away — it may take a few seconds.', icon: 'question', confirmButtonText: 'Yes, check now', confirmButtonColor: getComputedStyle(document.documentElement).getPropertyValue('--green').trim()}); return false;">
-          {% csrf_token %}
-          <button type="submit" class="ml-quick-action" style="background:none; border:none; width:100%; text-align:left; cursor:pointer; border-bottom:1px solid var(--ml-border); font-family:inherit;">
-            <svg viewBox="0 0 24 24" fill="none"><path d="M21 12a9 9 0 1 1-2.6-6.4M21 3v6h-6" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
-            Check All PC Status
-          </button>
-        </form>
+        
         <a href="{% url 'pc_status_export' %}?format=pdf" class="ml-quick-action">
           <svg viewBox="0 0 24 24"><use href="#icon-pdf-doc"/></svg>
           Export PC Status Report

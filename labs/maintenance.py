@@ -1,8 +1,9 @@
 """
-Background housekeeping tasks — currently just the daily wipe of
+Background housekeeping tasks — currently just the periodic wipe of
 PCActivityLog, which can otherwise grow forever since a row is written
 every few seconds for every unlocked PC (see agent_config.json
-'activity_report_interval_seconds').
+'activity_report_interval_seconds'). Runs daily by default, or weekly if
+PC_ACTIVITY_LOG_WIPE_WEEKDAY is set — see start_daily_activity_log_wipe().
 
 Follows the same pattern as labs.network.start_background_status_checker:
 a single daemon thread started once from LabsConfig.ready().
@@ -59,14 +60,29 @@ def _backup_then_wipe():
     PCActivityLog.objects.all().delete()
 
 
-def _seconds_until(hour=0, minute=0):
-    """Seconds from right now until the next occurrence of hour:minute,
-    in the local (settings.TIME_ZONE) clock. If that time already passed
-    today, targets tomorrow instead."""
+def _seconds_until(hour=0, minute=0, weekday=None):
+    """Seconds from right now until the next occurrence of hour:minute, in
+    the local (settings.TIME_ZONE) clock.
+
+    If `weekday` is None, targets the next daily occurrence (today if that
+    time hasn't passed yet, otherwise tomorrow) — the original once-a-day
+    behavior.
+
+    If `weekday` is given (0=Monday ... 6=Sunday, matching
+    date.weekday()), targets the next occurrence of that specific weekday
+    at hour:minute — i.e. once a week — rolling forward a full 7 days if
+    today already matches but the time has passed."""
     now = timezone.localtime()
     target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if weekday is None:
+        if target <= now:
+            target += timedelta(days=1)
+        return (target - now).total_seconds()
+
+    days_ahead = (weekday - now.weekday()) % 7
+    target += timedelta(days=days_ahead)
     if target <= now:
-        target += timedelta(days=1)
+        target += timedelta(days=7)
     return (target - now).total_seconds()
 
 
@@ -75,10 +91,19 @@ _wiper_started = False  # guards against starting the loop twice in one process
 
 def start_daily_activity_log_wipe():
     """
-    Starts a daemon thread that deletes ALL PCActivityLog rows once a day,
-    at settings.PC_ACTIVITY_LOG_WIPE_HOUR (default: 0 = midnight, Asia/Manila
-    since that's TIME_ZONE). This is a full wipe, not a rolling retention —
-    every row is deleted, no history is kept past the wipe.
+    Starts a daemon thread that deletes ALL PCActivityLog rows on a
+    schedule set by settings.PC_ACTIVITY_LOG_WIPE_HOUR (default: 0 =
+    midnight, Asia/Manila since that's TIME_ZONE) and, optionally,
+    settings.PC_ACTIVITY_LOG_WIPE_WEEKDAY.
+
+    - PC_ACTIVITY_LOG_WIPE_WEEKDAY unset/None (default): wipes every day
+      at PC_ACTIVITY_LOG_WIPE_HOUR — the original behavior.
+    - PC_ACTIVITY_LOG_WIPE_WEEKDAY set to 0-6 (0=Monday ... 6=Sunday):
+      wipes once a week, on that weekday, at PC_ACTIVITY_LOG_WIPE_HOUR.
+
+    Either way this is a full wipe, not a rolling retention — every row
+    is deleted at wipe time, no history is kept past it (aside from the
+    .xlsx backup — see _backup_then_wipe).
 
     Safe to call more than once: only the first call actually starts a
     thread. Meant to be called once from labs.apps.LabsConfig.ready().
@@ -90,6 +115,7 @@ def start_daily_activity_log_wipe():
 
     from django.conf import settings
     hour = getattr(settings, 'PC_ACTIVITY_LOG_WIPE_HOUR', 0)
+    weekday = getattr(settings, 'PC_ACTIVITY_LOG_WIPE_WEEKDAY', None)
 
     def _loop():
         # Import here (not at module load time) so this only touches the DB
@@ -97,7 +123,7 @@ def start_daily_activity_log_wipe():
         from django.db import connections
 
         while True:
-            time.sleep(_seconds_until(hour))
+            time.sleep(_seconds_until(hour, weekday=weekday))
             try:
                 _backup_then_wipe()
             except Exception:

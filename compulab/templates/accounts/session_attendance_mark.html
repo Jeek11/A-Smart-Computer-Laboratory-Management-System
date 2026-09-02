@@ -24,10 +24,7 @@
 
 <div class="card">
   <div class="section-title">Present / absent, per student</div>
-  <p style="font-size:12px; color:#8b98a3; margin-top:-6px; margin-bottom:14px;">
-    Use this for classes where students didn't need to log into a lab PC (e.g. lecture-only sessions).
-    Marking a status here overrides the automatic PC-unlock estimate for that student.
-  </p>
+ 
   <form method="post"
         onsubmit="event.preventDefault(); compulabConfirmSubmit(this, {title: 'Save attendance?', text: 'Present/absent status for this session will be recorded.', icon: 'question', confirmButtonText: 'Yes, save', confirmButtonColor: getComputedStyle(document.documentElement).getPropertyValue('--green').trim()}); return false;">
     {% csrf_token %}

@@ -159,6 +159,73 @@ def send_override_warning(pc, admin_name, seconds):
         return False, f'Warning request to {pc.ip_address} failed: {e}'
 
 
+def _send_power_signal(pc, path, action_label):
+    """
+    Shared sender for shutdown_pc()/restart_pc() — same internet-cafe-style
+    approach as unlock_pc()/send_override_warning(): the server never
+    touches the PC directly, it just sends a small signed HTTP request to
+    the agent running locally on that PC, which is the one that actually
+    knows how to power itself off/restart (see lab_pc_agent/agent.py's
+    execute_power_command()).
+
+    Returns (success: bool, message: str). success only means the signal
+    reached the agent — the PC still takes ~30s to actually shut down/
+    restart after that (see the agent's grace period).
+    """
+    from django.conf import settings
+    import json
+    import urllib.request
+    import urllib.error
+
+    if not pc.ip_address:
+        return False, 'This PC has no IP address on file — cannot send a remote power command.'
+
+    port = getattr(settings, 'PC_AGENT_PORT', 5555)
+    secret = getattr(settings, 'PC_AGENT_SHARED_SECRET', '')
+    timeout = getattr(settings, 'PC_AGENT_TIMEOUT_SECONDS', 4)
+    url = f'http://{pc.ip_address}:{port}/{path}'
+    payload = json.dumps({'secret': secret}).encode('utf-8')
+    request = urllib.request.Request(
+        url, data=payload, headers={'Content-Type': 'application/json'}, method='POST',
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            if 200 <= response.status < 300:
+                return True, f'{action_label} signal sent to agent at {pc.ip_address}.'
+            return False, f'Agent at {pc.ip_address} responded with status {response.status}.'
+    except urllib.error.HTTPError as e:
+        if e.code == 403:
+            return False, f'Agent at {pc.ip_address} rejected the request — check PC_AGENT_SHARED_SECRET matches on both sides.'
+        return False, f'Agent at {pc.ip_address} returned an error: {e.code} {e.reason}'
+    except urllib.error.URLError as e:
+        return False, f'Could not reach agent at {pc.ip_address}:{port} — is the agent running on that PC? ({e.reason})'
+    except Exception as e:
+        return False, f'{action_label} request to {pc.ip_address} failed: {e}'
+
+
+def shutdown_pc(pc):
+    """Tells the agent on this PC to power it off (30s grace period)."""
+    return _send_power_signal(pc, 'shutdown', 'Shutdown')
+
+
+def restart_pc(pc):
+    """Tells the agent on this PC to restart it (30s grace period)."""
+    return _send_power_signal(pc, 'restart', 'Restart')
+
+
+def lock_pc(pc):
+    """
+    Tells the agent on this PC to immediately re-show its lock screen —
+    the same '/lock' signal the offline Manual PC Control tool
+    (lab_pc_agent/manual_unlock.html) already sends, just triggered here
+    from the web dashboard instead. The agent notifies the server itself
+    once it locks (reason='remote_lock' — see agent.py's poll_queue),
+    which clears pc.current_user/current_session, so nothing needs to be
+    updated on this end beyond sending the signal.
+    """
+    return _send_power_signal(pc, 'lock', 'Lock')
+
+
 def refresh_pc_statuses(pcs):
     """
     Pings every PC in `pcs` that has an IP address on file, in parallel,
@@ -365,6 +432,68 @@ def release_expired_pc_sessions():
     return released
 
 
+def auto_lock_after_hours():
+    """
+    Locks every PC still logged in past its lab's closing time (see Lab,
+    set on Manage Labs) — called on the same background loop as
+    refresh_pc_statuses()/release_expired_pc_sessions(), so no separate
+    cron/Task Scheduler entry is needed.
+
+    Deliberately narrow about WHICH sessions it touches: only a normal,
+    reservation-based login (current_user set, current_login_via_override
+    False, no current_guest_name) gets auto-locked. A PC whose current
+    session started via Override Check-In (current_login_via_override
+    True) or a Guest walk-in / Manual Unlock (current_guest_name set) is
+    left alone — those two flows exist specifically to work outside the
+    normal schedule, so a lab being "closed" on paper shouldn't cut them
+    off. See scheduling._slot_error for the matching exemption on the
+    reservation-creation side.
+
+    Sends the same '/lock' signal the admin dashboard's Lock button does
+    (see lock_pc() above) — a real signal to the agent, not just a status
+    flip on the server, so the PC's screen actually re-locks. A PC with no
+    IP address on file is skipped (nothing to send the signal to) and
+    logged as such.
+    """
+    from labs.models import Lab, PC
+    from accounts.models import ActivityLog
+
+    now_time = timezone.localtime().time()
+    locked = 0
+
+    for lab in Lab.objects.all():
+        if now_time < lab.closing_time:
+            continue  # still within this lab's operating hours
+
+        pcs = (
+            PC.objects.filter(lab=lab, status='in_use', current_login_via_override=False)
+            .exclude(current_guest_name__gt='')
+            .select_related('lab', 'current_user')
+        )
+        for pc in pcs:
+            if not pc.ip_address:
+                continue  # nothing to send the lock signal to
+
+            success, detail = lock_pc(pc)
+            who = pc.current_user.display_name if pc.current_user else 'someone'
+            ActivityLog.objects.create(
+                actor=None,
+                action='pc_lock',
+                target_identifier=pc.current_user.id_number if pc.current_user else '',
+                pc=pc,
+                details=(
+                    f"{pc.pc_id} ({lab.name}) auto-locked — {lab.name} closes at "
+                    f"{lab.closing_time.strftime('%I:%M %p').lstrip('0')} and {who}'s session "
+                    f"was still active."
+                    + ('' if success else f' Signal did not go through: {detail}')
+                ),
+            )
+            if success:
+                locked += 1
+
+    return locked
+
+
 _checker_started = False  # guards against starting the loop twice in one process
 
 
@@ -376,6 +505,9 @@ def start_background_status_checker():
     Also runs release_expired_pc_sessions() on the same loop, so PCs stuck
     showing a stale "in use by <name>" (see that function's docstring) get
     cleared automatically too, without needing a ping/reachability signal.
+    Also runs auto_lock_after_hours() on the same loop, so a PC still
+    logged in past its lab's closing time gets locked automatically —
+    see that function's docstring for the Override/Guest exemption.
 
     Safe to call more than once: only the first call actually starts a
     thread. Meant to be called once from labs.apps.LabsConfig.ready().
@@ -403,6 +535,7 @@ def start_background_status_checker():
                 pcs = PC.objects.exclude(ip_address__isnull=True)
                 refresh_pc_statuses(pcs)
                 release_expired_pc_sessions()
+                auto_lock_after_hours()
             except Exception:
                 # A transient DB hiccup or ping failure shouldn't kill the
                 # background loop — just try again next interval.

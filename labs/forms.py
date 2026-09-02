@@ -7,7 +7,7 @@ import ipaddress
 class PCImportForm(forms.Form):
     file = forms.FileField(
         label='CSV or Excel file',
-        help_text='Columns: Lab, PC ID, IP Address (optional), Status (optional).'
+        help_text='Columns: Lab, PC ID, IP Address, Status (optional).'
     )
 
     def clean_file(self):
@@ -30,12 +30,16 @@ class LabForm(forms.ModelForm):
 
 class PCForm(forms.ModelForm):
     """
-    Same fields as the plain PC ModelForm, plus one guardrail: reject
-    loopback/reserved IP addresses (127.0.0.0/8, 0.0.0.0, etc). Those always
-    "ping back" the server itself, not the actual lab PC, so the status
-    checker would report the PC as online forever regardless of whether it's
-    really on — a confusing, hard-to-debug false positive. A blank IP is
-    still allowed (that PC is simply excluded from auto-checks, as before).
+    Same fields as the plain PC ModelForm, plus two guardrails:
+    - IP Address is required (even though the model field itself stays
+      optional for backward compatibility with older records) — remote
+      Shutdown/Restart/Lock and the automatic online/offline checker all
+      need it, so a PC without one can't actually be monitored/managed.
+    - Loopback/reserved IPs (127.0.0.0/8, 0.0.0.0, etc) are rejected.
+      Those always "ping back" the server itself, not the actual lab PC,
+      so the status checker would report the PC as online forever
+      regardless of whether it's really on — a confusing, hard-to-debug
+      false positive.
     """
     class Meta:
         model = PC
@@ -48,6 +52,12 @@ class PCForm(forms.ModelForm):
     # errors properly to screen readers instead of relying on color alone.
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        # Model field stays optional (blank=True) so existing PCs added
+        # before this rule took effect don't break — but every NEW/edited
+        # PC going through this form must supply one, since remote
+        # Shutdown/Restart/Lock and the automatic online/offline checker
+        # all depend on it.
+        self.fields['ip_address'].required = True
         help_ids = {'ip_address': 'id_ip_address_help', 'status': 'id_status_help'}
         for name, field in self.fields.items():
             described_by = []

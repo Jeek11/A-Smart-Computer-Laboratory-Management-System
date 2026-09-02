@@ -1,5 +1,5 @@
 import json
-from datetime import timedelta
+from datetime import timedelta, datetime, timezone as dt_timezone
 from django.views.generic import TemplateView, ListView, UpdateView, CreateView, DeleteView, FormView
 from django.http import JsonResponse
 from django.shortcuts import redirect, get_object_or_404, render
@@ -16,6 +16,40 @@ from labs.network import refresh_pc_statuses
 from labs.privacy import resolve_site_label
 from labs.forms import ReservationPCLoginForm, MaintenanceScheduleForm, LabForm, InventoryItemForm, PCForm, PCImportForm
 from notifications import services as notify_service
+
+
+def _local_day_bounds(day):
+    """
+    Returns (start, end) — timezone-aware datetime bounds [start, end) —
+    for one local calendar day, in the project's active timezone
+    (Asia/Manila). Accepts either a date object or a 'YYYY-MM-DD' string
+    (e.g. straight from request.GET); returns (None, None) for anything
+    that can't be parsed so callers can just skip filtering.
+
+    Used INSTEAD OF Django's `__date=`/`__date__gte=` lookups (e.g.
+    `captured_at__date=day`) wherever a query needs to match "everything
+    on this local day". Those lookups ask the DATABASE to convert each
+    stored UTC timestamp into the local timezone before comparing — on
+    MySQL that means a `CONVERT_TZ(...)` call, which silently returns
+    NULL (matching NOTHING, no error) if the server's named-timezone
+    tables aren't loaded. That's the MySQL default on plain XAMPP/Laragon
+    installs unless `mysql_tzinfo_to_sql` was run — a very easy thing to
+    miss, and the likely cause behind "I filtered by today's date and
+    nothing showed up" even though the data is right there.
+    Computing the day's UTC boundaries here in Python and filtering with
+    __gte/__lt sidesteps CONVERT_TZ entirely, so it works regardless of
+    whatever timezone data the MySQL server does or doesn't have.
+    """
+    if day in (None, ''):
+        return None, None
+    if isinstance(day, str):
+        from django.utils.dateparse import parse_date
+        day = parse_date(day)
+        if day is None:
+            return None, None
+    from datetime import datetime as _dt
+    start = timezone.make_aware(_dt.combine(day, _dt.min.time()))
+    return start, start + timedelta(days=1)
 
 
 # admin main dashboard
@@ -52,13 +86,14 @@ class AdminDashboardView(RoleRequiredMixin, TemplateView):
         maintenance_count = pcs.filter(status='maintenance').count()
         issue_count = pcs.filter(status='issue').count()
 
+        _week_start_bound, _ = _local_day_bounds(week_start)
         ctx['total_students'] = total_students
         ctx['new_students_this_week'] = User.objects.filter(
-            role='student', date_joined__date__gte=week_start
+            role='student', date_joined__gte=_week_start_bound
         ).count()
         ctx['total_instructors'] = total_instructors
         ctx['new_instructors_this_week'] = User.objects.filter(
-            role='instructor', date_joined__date__gte=week_start
+            role='instructor', date_joined__gte=_week_start_bound
         ).count()
         ctx['total_labs'] = Lab.objects.count()
         ctx['total_pcs'] = total_pcs
@@ -87,8 +122,9 @@ class AdminDashboardView(RoleRequiredMixin, TemplateView):
         ).count()
         ctx['pending_reservations_count'] = SessionRequest.objects.filter(status='pending').count()
 
+        _today_start, _today_end = _local_day_bounds(today)
         todays_attendance = ActivityLog.objects.filter(
-            action='pc_unlock', created_at__date=today
+            action='pc_unlock', created_at__gte=_today_start, created_at__lt=_today_end
         ).values('target_identifier').distinct().count()
         ctx['todays_attendance'] = todays_attendance
         ctx['todays_attendance_pct'] = (
@@ -98,8 +134,9 @@ class AdminDashboardView(RoleRequiredMixin, TemplateView):
         # --- daily attendance trend (this week, Mon-Sun) ---
         attendance_trend = []
         for d in week_days:
+            d_start, d_end = _local_day_bounds(d)
             count = ActivityLog.objects.filter(
-                action='pc_unlock', created_at__date=d
+                action='pc_unlock', created_at__gte=d_start, created_at__lt=d_end
             ).values('target_identifier').distinct().count()
             attendance_trend.append(count)
         ctx['attendance_trend_labels'] = json.dumps(['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'])
@@ -419,7 +456,8 @@ def verify_reservation_and_check_in(remote_addr, id_number, code):
     pc.last_active = timezone.now()
     pc.current_user = checked_in_user
     pc.current_session = session
-    pc.save(update_fields=['status', 'last_active', 'current_user', 'current_session'])
+    pc.current_login_via_override = False
+    pc.save(update_fields=['status', 'last_active', 'current_user', 'current_session', 'current_login_via_override'])
 
     ActivityLog.objects.create(
         actor=checked_in_user,
@@ -567,10 +605,27 @@ def pc_agent_info_api(request):
     if pc is None:
         return JsonResponse({'ok': False, 'error': 'PC not registered'}, status=200)
 
+    lab = pc.lab
+    now_time = timezone.localtime().time()
+    lab_is_open = lab.opening_time <= now_time <= lab.closing_time
+    open_lbl = lab.opening_time.strftime('%I:%M %p').lstrip('0')
+    close_lbl = lab.closing_time.strftime('%I:%M %p').lstrip('0')
+
     return JsonResponse({
         'ok': True,
         'pc_id': pc.pc_id,
-        'lab_name': pc.lab.name,
+        'lab_name': lab.name,
+        # Used by the lock screen to show a "Laboratory Closed" badge and
+        # disable the ID/Reservation Code fields for normal self-service
+        # login outside the lab's operating hours (Manage Labs). This is
+        # informational/UI-only on the agent side — it does NOT affect
+        # Override Check-In or Manual Unlock, which the server sends
+        # straight to this same PC's /unlock endpoint regardless of what
+        # this lock screen shows or has disabled (see labs/network.py
+        # unlock_pc()/lock_pc() and scheduling._slot_error's matching
+        # exemption for those two flows on the booking side).
+        'lab_is_open': lab_is_open,
+        'lab_hours': f'{open_lbl}–{close_lbl}',
     })
 
 
@@ -622,6 +677,7 @@ def pc_agent_activity_api(request):
         session=pc.current_session,
         window_title=window_title,
         page_url=page_url,
+        via_override=pc.current_login_via_override,
     )
 
     # Bump last_active on every real activity ping, not just at
@@ -819,7 +875,8 @@ def manual_unlock_log_api(request):
     pc.current_user = None
     pc.current_guest_name = guest_name
     pc.current_session = active_session
-    pc.save(update_fields=['status', 'last_active', 'current_user', 'current_guest_name', 'current_session'])
+    pc.current_login_via_override = False
+    pc.save(update_fields=['status', 'last_active', 'current_user', 'current_guest_name', 'current_session', 'current_login_via_override'])
 
     ActivityLog.objects.create(
         actor=None,
@@ -903,12 +960,27 @@ class PCStatusView(RoleRequiredMixin, TemplateView):
             'issue_count': issue_count, 'issue_pct': pct(issue_count),
         })
 
+        # ---- Closed-lab indicator — which labs are currently outside their
+        # opening_time–closing_time (see Lab, set on Manage Labs). Purely
+        # informational here (a PC can still be "Available"/"In Use" after
+        # hours via Override/Manual Unlock, which are exempt — see
+        # scheduling._slot_error) — this just flags it in the PC list/table
+        # so an Admin/In-Charge notices at a glance that any activity on a
+        # "closed" lab right now is happening outside the normal schedule.
+        _now_time = timezone.localtime().time()
+        closed_lab_ids = {
+            lab.pk for lab in labs_qs
+            if not (lab.opening_time <= _now_time <= lab.closing_time)
+        }
+        ctx['closed_lab_ids'] = closed_lab_ids
+
         # ---- "Day" lookup mode — which PCs were actually checked in to
         # (unlocked) on a past date, from the login history. PC.last_active
         # gets overwritten by later checks, so it can't answer this. ----
         if day:
+            _day_start, _day_end = _local_day_bounds(day)
             logs = ActivityLog.objects.filter(
-                action='pc_unlock', pc__isnull=False, created_at__date=day
+                action='pc_unlock', pc__isnull=False, created_at__gte=_day_start, created_at__lt=_day_end
             ).select_related('pc', 'pc__lab', 'actor').order_by('pc__lab__name', 'pc__pc_id', 'created_at')
             if lab_id:
                 logs = logs.filter(pc__lab_id=lab_id)
@@ -1084,7 +1156,8 @@ def _finish_override_grant(pc_pk, account_pk, outgoing_session_pk, admin_pk):
     pc.last_active = timezone.now()
     pc.current_user = account
     pc.current_session = active_session
-    pc.save(update_fields=['status', 'last_active', 'current_user', 'current_session'])
+    pc.current_login_via_override = True
+    pc.save(update_fields=['status', 'last_active', 'current_user', 'current_session', 'current_login_via_override'])
 
     ActivityLog.objects.create(
         actor=admin,
@@ -1245,7 +1318,8 @@ class OverrideCheckInView(RoleRequiredMixin, ModalFormMixin, TemplateView):
         pc.last_active = timezone.now()
         pc.current_user = account
         pc.current_session = active_session
-        pc.save(update_fields=['status', 'last_active', 'current_user', 'current_session'])
+        pc.current_login_via_override = True
+        pc.save(update_fields=['status', 'last_active', 'current_user', 'current_session', 'current_login_via_override'])
 
         account_name = account.display_name
         ActivityLog.objects.create(
@@ -1339,7 +1413,8 @@ class ManualUnlockView(RoleRequiredMixin, ModalFormMixin, TemplateView):
         pc.current_user = None
         pc.current_guest_name = guest_name
         pc.current_session = active_session
-        pc.save(update_fields=['status', 'last_active', 'current_user', 'current_guest_name', 'current_session'])
+        pc.current_login_via_override = False
+        pc.save(update_fields=['status', 'last_active', 'current_user', 'current_guest_name', 'current_session', 'current_login_via_override'])
 
         ActivityLog.objects.create(
             actor=request.user,
@@ -1486,6 +1561,12 @@ def _build_pc_sessions(logs, now, gap):
             'duration': duration, 'status': status,
             'blocks': blocks, 'rows': rows, 'sample_count': len(run),
             'scheduling_session': first.session,
+            'via_override': first.via_override,
+            # Raw PCActivityLog rows that make up this one session — kept
+            # around so export_pc_activity_log() can build a report scoped
+            # to exactly this session (not the whole PC/day) when a
+            # 'session' key is passed in. See "View Full Session Report".
+            'logs': run,
         })
 
     for log in logs:
@@ -1524,13 +1605,33 @@ def _pc_activity_filter_logs(request, base_qs):
         logs = logs.filter(pc__lab_id=lab_id)
     if pc_id:
         logs = logs.filter(pc_id=pc_id)
-    if student_id:
+    if student_id == 'guest':
+        logs = logs.filter(student__isnull=True, guest_name__gt='')
+    elif student_id == 'override':
+        logs = logs.filter(via_override=True)
+    elif student_id:
         logs = logs.filter(student_id=student_id)
     if day:
-        logs = logs.filter(captured_at__date=day)
+        _day_start, _day_end = _local_day_bounds(day)
+        if _day_start:
+            logs = logs.filter(captured_at__gte=_day_start, captured_at__lt=_day_end)
     if time_range in ('morning', 'afternoon', 'evening'):
+        from django.db.models import F, ExpressionWrapper, DateTimeField
+        from django.db.models.functions import ExtractHour
         lo, hi = {'morning': (6, 12), 'afternoon': (12, 18), 'evening': (18, 24)}[time_range]
-        logs = logs.filter(captured_at__hour__gte=lo, captured_at__hour__lt=hi)
+        # Asia/Manila is a fixed UTC+8 all year (no DST), so instead of
+        # asking MySQL to CONVERT_TZ captured_at (stored in UTC) to local
+        # time before extracting the hour — which silently returns
+        # NULL/matches nothing if the server's named-timezone tables
+        # aren't loaded, see _local_day_bounds() above for the same issue
+        # on the Date filter — we shift the raw UTC value by the fixed
+        # +8h offset ourselves, then extract the hour with tzinfo pinned
+        # to UTC so Django does NOT also try to convert it again.
+        logs = logs.annotate(
+            _local_dt=ExpressionWrapper(F('captured_at') + timedelta(hours=8), output_field=DateTimeField())
+        ).annotate(
+            _local_hour=ExtractHour('_local_dt', tzinfo=dt_timezone.utc)
+        ).filter(_local_hour__gte=lo, _local_hour__lt=hi)
     if q:
         logs = logs.filter(
             Q(window_title__icontains=q) |
@@ -1606,9 +1707,10 @@ class PCActivityLogView(RoleRequiredMixin, TemplateView):
         # totals rather than the current filter, so they read like a
         # steady dashboard summary instead of jumping around as filters
         # are applied to the table below. ----
+        _today_start, _today_end = _local_day_bounds(today)
         today_sessions = _build_pc_sessions(
             list(PCActivityLog.objects.select_related('pc', 'student')
-                 .filter(captured_at__date=today).order_by('pc_id', 'captured_at')),
+                 .filter(captured_at__gte=_today_start, captured_at__lt=_today_end).order_by('pc_id', 'captured_at')),
             now, self.SESSION_GAP,
         )
         durations_today = [s['duration'] for s in today_sessions if s['duration']]
@@ -1623,7 +1725,7 @@ class PCActivityLogView(RoleRequiredMixin, TemplateView):
         ctx['stats'] = {
             'total_sessions_today': len(today_sessions),
             'active_students_now': active_students_now,
-            'total_logs_today': PCActivityLog.objects.filter(captured_at__date=today).count(),
+            'total_logs_today': PCActivityLog.objects.filter(captured_at__gte=_today_start, captured_at__lt=_today_end).count(),
             'avg_session_duration': _pc_activity_fmt_duration(avg_duration) if avg_duration else '—',
             'active_pcs_now': active_pcs_now,
             'pc_utilization_pct': round(active_pcs_now / total_pcs * 100) if total_pcs else 0,
@@ -1724,13 +1826,69 @@ def delete_pc_activity_log(request):
 
 
 def export_pc_activity_log(request):
-    """Exports the currently filtered PCActivityLog view as PDF or Excel —
-    same filters (lab/pc/student/day/time_range/q) as PCActivityLogView,
-    but the full filtered set rather than the on-screen page. Handy for
-    keeping a copy before the daily auto-wipe deletes everything."""
+    """Exports PC activity as PDF or Excel. Two modes:
+
+    - Session-scoped (?session=<key>): used by the Session Details panel's
+      "View Full Session Report"/"Export Session" buttons. Rebuilds that
+      ONE login->logout session (same grouping _build_pc_sessions uses for
+      the on-screen panel) and exports only its rows — matches exactly
+      what's shown in Session Details / Window & Application Activity,
+      not the whole PC's whole day.
+    - Filtered (no 'session' param): the original behavior — exports
+      the currently filtered PCActivityLog view (lab/pc/student/day/
+      time_range/q), same filters as PCActivityLogView but the full
+      filtered set rather than just the on-screen page. Handy for keeping
+      a copy before the daily auto-wipe deletes everything.
+    """
     from labs.reports import _require_report_access, _export_pdf, _export_excel
 
     _require_report_access(request)
+
+    fmt = request.GET.get('format', 'pdf')
+    session_key = request.GET.get('session', '').strip()
+
+    if session_key:
+        try:
+            pc_pk_str, ts_str = session_key.rsplit('-', 1)
+            pc_pk = int(pc_pk_str)
+            login_dt = datetime.fromtimestamp(int(ts_str), tz=dt_timezone.utc)
+        except (ValueError, TypeError):
+            pc_pk = None
+
+        session = None
+        if pc_pk is not None:
+            login_local_date = timezone.localtime(login_dt).date()
+            _day_start, _day_end = _local_day_bounds(login_local_date)
+            day_logs = list(
+                PCActivityLog.objects.select_related('pc', 'pc__lab', 'student', 'session')
+                .filter(pc_id=pc_pk, captured_at__gte=_day_start, captured_at__lt=_day_end)
+                .order_by('captured_at')
+            )
+            sessions = _build_pc_sessions(day_logs, timezone.localtime(), PCActivityLogView.SESSION_GAP)
+            session = next((s for s in sessions if s['key'] == session_key), None)
+
+        if session is None:
+            messages.error(request, "That session couldn't be found — it may have been auto-wiped already.")
+            return redirect('pc_activity_log')
+
+        headers = ['Time', 'PC', 'User', 'Role', 'Session', 'Active window title']
+        rows = [
+            [
+                log.captured_at.strftime('%Y-%m-%d %H:%M:%S'),
+                f'{log.pc.lab.name} — {log.pc.pc_id}',
+                log.student.display_name if log.student else (log.guest_name or '—'),
+                log.student.get_role_display() if log.student else ('Guest' if log.guest_name else '—'),
+                f'{log.session.requester_name} ({log.session.date} {log.session.start_time}-{log.session.end_time})' if log.session else '—',
+                log.window_title or '—',
+            ]
+            for log in session['logs']
+        ]
+
+        who = session['student'].display_name if session['student'] else (session['guest_name'] or 'Guest')
+        period = f"{who} — {session['pc'].pc_id} — {timezone.localtime(session['login_time']).strftime('%Y-%m-%d %H:%M')}"
+        if fmt == 'excel':
+            return _export_excel('PC Session Report', period, headers, rows, 'pc_session_report.xlsx')
+        return _export_pdf('PC Session Report', period, headers, rows, 'pc_session_report.pdf')
 
     logs, filters = _pc_activity_filter_logs(
         request,
@@ -1743,8 +1901,8 @@ def export_pc_activity_log(request):
         [
             log.captured_at.strftime('%Y-%m-%d %H:%M:%S'),
             f'{log.pc.lab.name} — {log.pc.pc_id}',
-            log.student.display_name if log.student else '—',
-            log.student.get_role_display() if log.student else '—',
+            log.student.display_name if log.student else (log.guest_name or '—'),
+            log.student.get_role_display() if log.student else ('Guest' if log.guest_name else '—'),
             f'{log.session.requester_name} ({log.session.date} {log.session.start_time}-{log.session.end_time})' if log.session else '—',
             log.window_title or '—',
         ]
@@ -1753,7 +1911,6 @@ def export_pc_activity_log(request):
 
     day = filters['day']
     period = day if day else ('All time' if not filters['pc'] and not filters['q'] else 'Filtered')
-    fmt = request.GET.get('format', 'pdf')
     if fmt == 'excel':
         return _export_excel('PC Activity Log', period, headers, rows, 'pc_activity_log.xlsx')
     return _export_pdf('PC Activity Log', period, headers, rows, 'pc_activity_log.pdf')
@@ -1874,6 +2031,134 @@ def pc_force_release(request, pk):
 
     messages.success(request, f'{pc.pc_id} released — was stuck showing "in use by {outgoing_name}".')
     return redirect(request.META.get('HTTP_REFERER', 'pc_status'))
+
+
+def _pc_power_action(request, pk, action):
+    """
+    Shared handler for pc_shutdown()/pc_restart()/pc_lock() — sends a
+    remote power/lock signal to the PC's agent (see labs/network.py) and
+    logs it, same permission/lab-scoping rules as pc_force_release above.
+    Fire-and-forget from the server's point of view: for shutdown/restart
+    the PC still takes ~30s to actually act after the agent gets the
+    signal; lock is near-instant.
+    """
+    if request.method != 'POST':
+        raise PermissionDenied
+    if request.user.role not in ['admin', 'incharge']:
+        raise PermissionDenied
+
+    from accounts.models import ActivityLog
+    from labs.network import shutdown_pc, restart_pc, lock_pc
+
+    pc = get_object_or_404(PC.objects.select_related('lab', 'current_user'), pk=pk)
+    if request.user.role == 'incharge' and request.user.assigned_lab_id != pc.lab_id:
+        raise PermissionDenied
+
+    send_signal = {'shutdown': shutdown_pc, 'restart': restart_pc, 'lock': lock_pc}[action]
+    action_log_name = {'shutdown': 'pc_shutdown', 'restart': 'pc_restart', 'lock': 'pc_lock'}[action]
+    success, detail = send_signal(pc)
+
+    ActivityLog.objects.create(
+        actor=request.user,
+        action=action_log_name,
+        target_identifier=pc.current_user.id_number if pc.current_user else (pc.current_guest_name or ''),
+        pc=pc,
+        details=(
+            f"{pc.pc_id} ({pc.lab.name}) remote {action} triggered by {request.user.display_name}."
+            + ('' if success else f' Signal did not go through: {detail}')
+        ),
+    )
+
+    if success:
+        if action == 'lock':
+            messages.success(request, f'{pc.pc_id} was locked.')
+        else:
+            verb = 'shut down' if action == 'shutdown' else 'restart'
+            messages.success(request, f'{pc.pc_id} will {verb} in about 30 seconds.')
+    else:
+        messages.error(request, f"Couldn't {action} {pc.pc_id}: {detail}")
+
+    return redirect(request.META.get('HTTP_REFERER', 'pc_status'))
+
+
+def pc_bulk_power_action(request):
+    """
+    Bulk version of pc_shutdown/pc_restart/lock — runs the same per-PC
+    signal across every PC id submitted from the checkboxes on the PC
+    Status page (see the pc-select-checkbox / "Select All" JS in
+    pc_status.html), so Admin/In-Charge can shut down, restart, or lock a
+    whole lab — or any hand-picked subset — in one action instead of
+    clicking each PC one at a time. Skips any PC without an IP address on
+    file (nothing to send the signal to) and, for In-Charge, any PC
+    outside their assigned lab.
+    """
+    if request.method != 'POST':
+        raise PermissionDenied
+    if request.user.role not in ['admin', 'incharge']:
+        raise PermissionDenied
+
+    from accounts.models import ActivityLog
+    from labs.network import shutdown_pc, restart_pc, lock_pc
+
+    action = request.POST.get('action', '')
+    if action not in ('shutdown', 'restart', 'lock'):
+        messages.error(request, 'Unknown bulk power action.')
+        return redirect(request.META.get('HTTP_REFERER', 'pc_status'))
+
+    raw_ids = request.POST.get('pc_ids', '')
+    pc_ids = [int(x) for x in raw_ids.split(',') if x.strip().isdigit()]
+    if not pc_ids:
+        messages.error(request, 'No PCs were selected.')
+        return redirect(request.META.get('HTTP_REFERER', 'pc_status'))
+
+    pcs = PC.objects.select_related('lab', 'current_user').filter(pk__in=pc_ids)
+    if request.user.role == 'incharge':
+        pcs = pcs.filter(lab_id=request.user.assigned_lab_id)
+
+    send_signal = {'shutdown': shutdown_pc, 'restart': restart_pc, 'lock': lock_pc}[action]
+    action_log_name = {'shutdown': 'pc_shutdown', 'restart': 'pc_restart', 'lock': 'pc_lock'}[action]
+    verb = {'shutdown': 'shut down', 'restart': 'restart', 'lock': 'lock'}[action]
+
+    ok_count = 0
+    skipped_count = 0
+    for pc in pcs:
+        if not pc.ip_address:
+            skipped_count += 1
+            continue
+        success, detail = send_signal(pc)
+        ActivityLog.objects.create(
+            actor=request.user,
+            action=action_log_name,
+            target_identifier=pc.current_user.id_number if pc.current_user else (pc.current_guest_name or ''),
+            pc=pc,
+            details=(
+                f"{pc.pc_id} ({pc.lab.name}) bulk {action} triggered by {request.user.display_name}."
+                + ('' if success else f' Signal did not go through: {detail}')
+            ),
+        )
+        if success:
+            ok_count += 1
+        else:
+            skipped_count += 1
+
+    if ok_count:
+        messages.success(request, f'Sent {verb} signal to {ok_count} PC(s).')
+    if skipped_count:
+        messages.warning(request, f'{skipped_count} PC(s) were skipped (no IP on file, offline, or agent unreachable).')
+
+    return redirect(request.META.get('HTTP_REFERER', 'pc_status'))
+
+
+def pc_shutdown(request, pk):
+    return _pc_power_action(request, pk, 'shutdown')
+
+
+def pc_restart(request, pk):
+    return _pc_power_action(request, pk, 'restart')
+
+
+def pc_lock(request, pk):
+    return _pc_power_action(request, pk, 'lock')
 
 
 # ---- Lab management (create/edit/delete — no more hardcoded/admin-only setup) ----
@@ -2038,15 +2323,37 @@ class PCCreateView(RoleRequiredMixin, ModalFormMixin, CreateView):
         return super().form_valid(form)
 
 
+def pc_import_template(request):
+    """Downloadable starter CSV for PCImportView — matches the exact
+    headers/order that import expects (see PCImportView.form_valid's
+    row.get('lab')/row.get('pc id')/row.get('ip address')/row.get('status')
+    lookups), pre-filled with a couple of example rows so it's obvious
+    what belongs in each column without having to read the rules list."""
+    from django.http import HttpResponse
+    import csv
+
+    if not request.user.is_authenticated or request.user.role != 'admin':
+        raise PermissionDenied
+
+    response = HttpResponse(content_type='text/csv')
+    response['Content-Disposition'] = 'attachment; filename="pc_import_template.csv"'
+    writer = csv.writer(response)
+    writer.writerow(['Lab', 'PC ID', 'IP Address', 'Status'])
+    writer.writerow(['Lab 01', 'PC01', '192.168.1.11', 'Available'])
+    writer.writerow(['Lab 01', 'PC02', '192.168.1.12', ''])
+    return response
+
+
 class PCImportView(RoleRequiredMixin, FormView):
     """
     Bulk-add PCs from an uploaded CSV or Excel file instead of the one-by-one
     'Add PC' form. Expected columns (header row, any order): Lab, PC ID,
-    IP Address (optional), Status (optional — defaults to Offline).
+    IP Address, Status (optional — defaults to Offline).
     Rows are validated the same way the single PCForm would validate them
-    (loopback IP rejected, lab must already exist, duplicate PC ID within
-    the same lab is skipped) and the whole thing runs in one DB transaction
-    so a bad file never leaves a half-imported mess behind.
+    (IP Address required, loopback IP rejected, lab must already exist,
+    duplicate PC ID within the same lab is skipped) and the whole thing
+    runs in one DB transaction so a bad file never leaves a half-imported
+    mess behind.
     """
     allowed_roles = ['admin']
     form_class = PCImportForm
@@ -2097,6 +2404,10 @@ class PCImportView(RoleRequiredMixin, FormView):
                 errors.append(f'Row {i}: missing Lab or PC ID — skipped.')
                 continue
 
+            if not ip_address:
+                errors.append(f'Row {i}: missing IP Address — skipped. (Required for Shutdown/Restart/Lock and automatic online/offline checks.)')
+                continue
+
             lab = labs_by_name.get(lab_name.strip().lower())
             if not lab:
                 errors.append(f'Row {i}: lab "{lab_name}" does not exist — skipped.')
@@ -2107,18 +2418,17 @@ class PCImportView(RoleRequiredMixin, FormView):
                 errors.append(f'Row {i}: "{pc_id}" already exists in {lab.name} — skipped.')
                 continue
 
-            if ip_address:
-                try:
-                    if ipaddress_mod.ip_address(ip_address).is_loopback:
-                        errors.append(f'Row {i}: "{ip_address}" is a loopback address — imported without an IP.')
-                        ip_address = ''
-                except ValueError:
-                    errors.append(f'Row {i}: "{ip_address}" is not a valid IP address — imported without an IP.')
-                    ip_address = ''
+            try:
+                if ipaddress_mod.ip_address(ip_address).is_loopback:
+                    errors.append(f'Row {i}: "{ip_address}" is a loopback address — skipped.')
+                    continue
+            except ValueError:
+                errors.append(f'Row {i}: "{ip_address}" is not a valid IP address — skipped.')
+                continue
 
             status = status_keys.get(status_raw) or status_labels.get(status_raw.lower()) or 'offline'
 
-            to_create.append(PC(lab=lab, pc_id=pc_id, ip_address=ip_address or None, status=status))
+            to_create.append(PC(lab=lab, pc_id=pc_id, ip_address=ip_address, status=status))
             seen_in_file.add(key)
             created.append(f'{pc_id} → {lab.name}')
 
@@ -2141,6 +2451,17 @@ class PCEditView(RoleRequiredMixin, ModalFormMixin, UpdateView):
     success_url = reverse_lazy('lab_list')
 
     def form_valid(self, form):
+        # PCForm exposes `status` alongside lab/pc_id/ip_address, so this
+        # form can change status away from 'in_use' too — current_user/
+        # current_session/current_guest_name are meaningless once that
+        # happens. Same guardrail as PCUpdateView (the "Update" button);
+        # without it here too, the "Edit" button could leave a stale name
+        # on the Current User column even after the status was corrected.
+        previous_status = PC.objects.get(pk=self.object.pk).status
+        if previous_status == 'in_use' and form.instance.status != 'in_use':
+            form.instance.current_user = None
+            form.instance.current_session = None
+            form.instance.current_guest_name = ''
         messages.success(self.request, f'PC "{form.instance.pc_id}" updated.')
         return super().form_valid(form)
 

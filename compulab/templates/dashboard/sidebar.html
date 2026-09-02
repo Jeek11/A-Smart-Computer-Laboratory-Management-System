@@ -56,6 +56,9 @@
     <symbol id="icon-unlock" viewBox="0 0 24 24"><rect x="3" y="11" width="18" height="10" rx="1.5"/><path d="M7 11V7a5 5 0 0 1 9.5-2.2"/></symbol>
     <symbol id="icon-print" viewBox="0 0 24 24"><path d="M6 9V3h12v6"/><rect x="4" y="9" width="16" height="8" rx="1.5"/><path d="M6 17v4h12v-4"/></symbol>
     <symbol id="icon-save" viewBox="0 0 24 24"><path d="M5 3h11l3 3v15H5z"/><path d="M8 3v6h8V3"/><path d="M8 21v-7h8v7"/></symbol>
+    <symbol id="icon-lock" viewBox="0 0 24 24"><rect x="4" y="10.5" width="16" height="10" rx="1.8"/><path d="M7.5 10.5V7a4.5 4.5 0 0 1 9 0v3.5"/><circle cx="12" cy="15.2" r="1.6"/><line x1="12" y1="16.8" x2="12" y2="18.4"/></symbol>
+    <symbol id="icon-shield" viewBox="0 0 24 24"><path d="M12 3l7 3v6c0 5-3 8.5-7 9-4-.5-7-4-7-9V6z"/></symbol>
+    <symbol id="icon-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3.5 2"/></symbol>
   </defs>
 </svg>
 
@@ -105,7 +108,12 @@ html[data-theme="light"] .nav.role-instructor { --accent-tint: rgba(15,118,110,0
     padding: 6px 8px 18px;
     margin-bottom: 8px;
     border-bottom: 1px solid var(--line);
+    text-decoration: none;
+    cursor: pointer;
+    border-radius: 8px;
+    transition: opacity 0.15s ease;
   }
+  .nav-brand:hover { opacity: 0.8; }
   .nav-brand-mark {
     width: 50px;
     height: 50px;
@@ -239,6 +247,14 @@ html[data-theme="light"] .nav.role-instructor { --accent-tint: rgba(15,118,110,0
     line-height: 1.5;
   }
 
+   .nav-dot-red {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--red);
+    flex: none;
+  }
+
   .nav-spacer { flex: 1; }
 
   .nav-logout-form { margin: 0; padding-top: 14px; margin-top: 10px; border-top: 1px solid var(--line); }
@@ -306,19 +322,7 @@ html[data-theme="light"] .nav.role-instructor { --accent-tint: rgba(15,118,110,0
 
 {% if request.user.role == 'admin' %}
 <nav class="nav role-admin">
-  <div class="nav-brand">
-    <img src="{% static 'img/logo.jpg' %}"
-         alt="Danao Technological College"
-         class="nav-brand-mark">
-
-   <span class="nav-brand-text">
-  <b>
-    <span><span class="brand-letter">D</span>anao</span>
-    <span><span class="brand-letter">T</span>echnological</span>
-    <span><span class="brand-letter">C</span>ollege</span>
-  </b>
-</span>
-  </div>
+{% include 'dashboard/_nav_brand.html' with dashboard_url='admin_dashboard' %}
 
   <div class="nav-section">Overview</div>
   <a class="nav-item {% if request.resolver_match.url_name == 'admin_dashboard' %}active{% endif %}"
@@ -363,7 +367,10 @@ html[data-theme="light"] .nav.role-instructor { --accent-tint: rgba(15,118,110,0
      href="{% url 'schedule' %}">
     <span class="nav-led"></span>
     <svg class="nav-icon"><use href="#icon-calendar"/></svg>
-    <span class="nav-label">Schedule & requests</span>
+        <span class="nav-label">Schedule & requests</span>
+    {% if pending_requests_count %}
+      <span class="nav-dot-red"></span>
+    {% endif %}
   </a>
   <a class="nav-item {% if request.resolver_match.url_name == 'roster_list' or request.resolver_match.url_name == 'roster_detail' %}active{% endif %}"
      href="{% url 'roster_list' %}">
@@ -394,19 +401,7 @@ html[data-theme="light"] .nav.role-instructor { --accent-tint: rgba(15,118,110,0
 
 {% elif request.user.role == 'incharge' %}
 <nav class="nav role-incharge">
-  <div class="nav-brand">
-    <img src="{% static 'img/logo.jpg' %}"
-         alt="Danao Technological College"
-         class="nav-brand-mark">
-
-   <span class="nav-brand-text">
-  <b>
-    <span><span class="brand-letter">D</span>anao</span>
-    <span><span class="brand-letter">T</span>echnological</span>
-    <span><span class="brand-letter">C</span>ollege</span>
-  </b>
-</span>
-  </div>
+{% include 'dashboard/_nav_brand.html' with dashboard_url='incharge_dashboard' %}
 
   <div class="nav-section">Overview</div>
   <a class="nav-item {% if request.resolver_match.url_name == 'incharge_dashboard' %}active{% endif %}"
@@ -430,11 +425,14 @@ html[data-theme="light"] .nav.role-instructor { --accent-tint: rgba(15,118,110,0
     <span class="nav-label">Lab schedule</span>
   </a>
   <a class="nav-item {% if request.resolver_match.url_name == 'schedule' %}active{% endif %}"
-     href="{% url 'schedule' %}">
-    <span class="nav-led"></span>
-    <svg class="nav-icon"><use href="#icon-calendar"/></svg>
-    <span class="nav-label">Schedule & requests</span>
-  </a>
+   href="{% url 'schedule' %}">
+  <span class="nav-led"></span>
+  <svg class="nav-icon"><use href="#icon-calendar"/></svg>
+  <span class="nav-label">Schedule & requests</span>
+  {% if pending_requests_count %}
+    <span class="nav-dot-red"></span>
+  {% endif %}
+</a>
   <a class="nav-item {% if request.resolver_match.url_name == 'roster_list' or request.resolver_match.url_name == 'roster_detail' %}active{% endif %}"
      href="{% url 'roster_list' %}">
     <span class="nav-led"></span>
@@ -479,19 +477,7 @@ html[data-theme="light"] .nav.role-instructor { --accent-tint: rgba(15,118,110,0
 
 {% elif request.user.role == 'instructor' %}
 <nav class="nav role-instructor">
-  <div class="nav-brand">
-    <img src="{% static 'img/logo.jpg' %}"
-         alt="Danao Technological College"
-         class="nav-brand-mark">
-
-   <span class="nav-brand-text">
-  <b>
-    <span><span class="brand-letter">D</span>anao</span>
-    <span><span class="brand-letter">T</span>echnological</span>
-    <span><span class="brand-letter">C</span>ollege</span>
-  </b>
-</span>
-  </div>
+{% include 'dashboard/_nav_brand.html' with dashboard_url='instructor_dashboard' %}
 
   <div class="nav-section">Overview</div>
   <a class="nav-item {% if request.resolver_match.url_name == 'instructor_dashboard' %}active{% endif %}"

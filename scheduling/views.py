@@ -43,10 +43,18 @@ def _slot_error(requester_type, lab, date, start_time, end_time, pcs_requested, 
     auto-assign however many PCs are actually available instead. Walk-in/
     Override instead go through the PC-count capacity check (see
     scheduling.utils.capacity_error) so they can share a slot based on how
-    many PCs are actually free. Returns an error message, or None if the
-    slot/request is fine."""
+    many PCs are actually free. Reservations (everything except Walk-in/
+    Override) are also rejected outright if the time falls outside the
+    lab's opening_time–closing_time (see Lab, set on Manage Labs) — Walk-in
+    and Override skip this too, since they exist specifically to handle
+    situations outside the normal schedule. Returns an error message, or
+    None if the slot/request is fine."""
     if requester_type in ('walk_in', 'override'):
         return capacity_error(requester_type, lab, date, start_time, end_time, pcs_requested, exclude_pk=exclude_pk)
+    if start_time < lab.opening_time or end_time > lab.closing_time:
+        open_lbl = lab.opening_time.strftime('%I:%M %p').lstrip('0')
+        close_lbl = lab.closing_time.strftime('%I:%M %p').lstrip('0')
+        return f'{lab.name} is only open {open_lbl}–{close_lbl}. Choose a time within operating hours.'
     if _official_schedule_conflict(lab, date, start_time, end_time, exclude_pk=exclude_pk):
         return 'Time slot conflict — this laboratory is already booked for an overlapping time on that date. Choose a different laboratory or schedule.'
     return None
@@ -960,7 +968,13 @@ class RosterDetailView(RoleRequiredMixin, ModalDetailMixin, DetailView):
         now = timezone.localtime()
         today, now_time = now.date(), now.time()
         all_sessions = self.object.sessions.select_related('lab').order_by('date', 'start_time')
-        paginator = Paginator(all_sessions, 15)
+        try:
+            per_page = int(self.request.GET.get('per_page', 15))
+        except (TypeError, ValueError):
+            per_page = 15
+        if per_page not in (10, 15, 25, 50):
+            per_page = 15
+        paginator = Paginator(all_sessions, per_page)
         page_number = self.request.GET.get('page')
         page_obj = paginator.get_page(page_number)
         for s in page_obj:
@@ -974,6 +988,7 @@ class RosterDetailView(RoleRequiredMixin, ModalDetailMixin, DetailView):
         ctx['sessions_page_obj'] = page_obj
         ctx['sessions_paginator'] = paginator
         ctx['sessions_is_paginated'] = page_obj.has_other_pages()
+        ctx['sessions_selected_per_page'] = per_page
         return ctx
 
 
@@ -989,6 +1004,12 @@ def roster_generate_sessions(request, pk):
         raise PermissionDenied
     roster = get_object_or_404(ClassRoster, pk=pk)
     if request.method == 'POST':
+        if roster.status == 'inactive':
+            messages.error(
+                request,
+                f'"{roster.name}" is archived — reactivate it first before generating more sessions.'
+            )
+            return modal_redirect(request, 'roster_detail', pk=roster.pk)
         pruned = roster.prune_stale_future_sessions()
         if pruned:
             messages.info(
@@ -1045,6 +1066,7 @@ def roster_archive(request, pk):
         raise PermissionDenied
     roster = get_object_or_404(ClassRoster, pk=pk)
     if request.method == 'POST':
+        reactivating = roster.status == 'inactive'
         roster.status = 'inactive' if roster.status == 'active' else 'active'
         roster.save(update_fields=['status'])
         messages.success(
@@ -1052,6 +1074,21 @@ def roster_archive(request, pk):
             f'Roster "{roster.name}" archived.' if roster.status == 'inactive'
             else f'Roster "{roster.name}" reactivated.'
         )
+        if reactivating and roster.status == 'active':
+            from scheduling.utils import roster_schedule_conflicts
+            conflicts = roster_schedule_conflicts(
+                roster.lab, roster.instructor, roster.section, roster.schedule_days,
+                roster.schedule_start_time, roster.schedule_end_time,
+                roster.schedule_valid_from, roster.schedule_valid_until,
+                exclude_pk=roster.pk,
+            )
+            if conflicts:
+                names = ', '.join(sorted({c['roster'].name for c in conflicts}))
+                messages.warning(
+                    request,
+                    f'Heads up: this roster\'s weekly time slot now overlaps with another active '
+                    f'roster ({names}) — Generate Sessions will skip any date that\'s already taken.'
+                )
     return modal_redirect(request, 'roster_detail', pk=roster.pk)
 
 

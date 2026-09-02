@@ -188,6 +188,12 @@ class ClassRoster(models.Model):
         auto-scheduled at all, and capped is a list of (date, note) tuples
         for sessions that were created with fewer students assigned than
         the roster's actual headcount.
+
+        A no-op (returns empty results) if the roster is Archived
+        (status='inactive') — an archived roster is treated as frozen and
+        should never pick up new sessions/reservation codes going forward,
+        even though its past sessions/history stay untouched. Reactivate
+        the roster first to resume generating its schedule.
         """
         from datetime import timedelta
         from scheduling.models import Session
@@ -197,7 +203,7 @@ class ClassRoster(models.Model):
         created_sessions = []
         skipped = []
         capped = []
-        if not self.has_full_schedule() or self.approval_status != 'approved':
+        if not self.has_full_schedule() or self.approval_status != 'approved' or self.status != 'active':
             return created_sessions, skipped, capped
 
         target_weekdays = {

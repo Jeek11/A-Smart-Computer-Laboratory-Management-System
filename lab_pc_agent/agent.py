@@ -187,6 +187,10 @@ class UnlockHandler(BaseHTTPRequestHandler):
             self._handle_signal('lock')
         elif self.path == '/override-warning':
             self._handle_override_warning()
+        elif self.path == '/shutdown':
+            self._handle_signal('shutdown')
+        elif self.path == '/restart':
+            self._handle_signal('restart')
         else:
             self._send(404, {'ok': False, 'error': 'not found'})
 
@@ -220,6 +224,29 @@ def notify_end_session_sync(server_url, secret, reason, timeout=3):
         urllib.request.urlopen(request, timeout=timeout)
     except Exception as e:
         print(f'[agent] Could not notify server of session end before logoff: {e}')
+
+
+def execute_power_command(action):
+    """
+    Runs the actual Windows shutdown/restart, called once poll_queue picks
+    up a 'shutdown' or 'restart' item (from a remote /shutdown or /restart
+    signal sent by the CompuLab server — see labs/network.py's
+    shutdown_pc()/restart_pc()).
+
+    Uses a 30-second OS-level grace period (`/t 30`) instead of an instant
+    `/t 0` so whoever is at the PC sees Windows' own countdown/notification
+    and has a moment to save work — matches the confirm-then-wait feel of
+    the existing local Restart/Power Off buttons on this same lock screen
+    (see restart_clicked/power_off_clicked above), just triggered remotely
+    instead of by a click.
+    """
+    try:
+        if action == 'restart':
+            subprocess.run(['shutdown', '/r', '/t', '30'], check=True)
+        else:
+            subprocess.run(['shutdown', '/s', '/t', '30'], check=True)
+    except Exception as e:
+        print(f'[agent] Remote {action} command failed: {e}')
 
 
 def submit_login_in_background(server_url, secret, id_number, reservation_code):
@@ -1856,6 +1883,14 @@ def poll_queue(root, lock_screen):
                     lock_screen.apply_network_status(item[1])
                 elif isinstance(item, tuple) and item[0] == 'override_warning':
                     lock_screen.start_override_countdown(item[1], item[2])
+                elif item in ('shutdown', 'restart'):
+                    # Same server notification path as a remote /lock —
+                    # clears pc.current_user/current_session on the
+                    # CompuLab server so it doesn't stay stuck showing
+                    # "in use" for a machine that's about to power off —
+                    # then actually runs the OS-level command.
+                    lock_screen.show(reason='remote_lock')
+                    execute_power_command(item)
             except Exception:
                 import traceback
                 print('[agent] Error while handling queued item — continuing anyway:')

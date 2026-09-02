@@ -51,6 +51,18 @@ class PC(models.Model):
         max_length=150, blank=True, default='',
         help_text="Full name of the walk-in guest currently using this PC via Manual Unlock, when there is no registered account (current_user stays null for guests). Cleared whenever the PC is locked again.",
     )
+    current_login_via_override = models.BooleanField(
+        default=False,
+        help_text=(
+            "True if the current session started via an Admin/In-Charge "
+            "Override Check-In (see OverrideCheckInView) rather than a "
+            "normal student unlock or a Manual Unlock guest walk-in. Set "
+            "at grant time on every login/unlock path, then copied onto "
+            "each PCActivityLog sample taken while this session is active "
+            "so the PC Activity Log's Search/User filter can distinguish "
+            "'Override' sessions after the fact."
+        ),
+    )
 
     def __str__(self):
         return self.pc_id
@@ -98,6 +110,10 @@ class PCActivityLog(models.Model):
     window_title = models.CharField(
         max_length=500, blank=True,
         help_text="The active/foreground window's title bar text at the moment of capture.",
+    )
+    via_override = models.BooleanField(
+        default=False,
+        help_text="Copied from pc.current_login_via_override at capture time — True if this sample belongs to a session that started via an Admin/In-Charge Override Check-In.",
     )
     page_url = models.CharField(
         max_length=500, blank=True, default='',

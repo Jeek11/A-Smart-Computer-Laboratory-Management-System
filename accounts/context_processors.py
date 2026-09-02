@@ -1,6 +1,7 @@
 # accounts/context_processors.py
 from notifications.models import Notification
 from issues.models import Issue
+from scheduling.models import SessionRequest
 from django.conf import settings
 
 def app_version(request):
@@ -14,5 +15,7 @@ def sidebar_counts(request):
             user=request.user, read=False
         ).count(),
         'open_issues_count': Issue.objects.filter(status='open').count()
+        if request.user.role in ['admin', 'incharge'] else 0,
+        'pending_requests_count': SessionRequest.objects.filter(status='pending').count()
         if request.user.role in ['admin', 'incharge'] else 0,
     }

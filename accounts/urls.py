@@ -11,6 +11,7 @@ urlpatterns = [
     path('users/import/', views.StudentImportView.as_view(), name='user_import'),
     path('users/import/template/', views.user_import_template, name='user_import_template'),
     path('users/add/', views.UserCreateView.as_view(), name='user_create'),
+    path('users/<int:pk>/', views.UserDetailView.as_view(), name='user_detail'),
     path('users/<int:pk>/edit/', views.UserUpdateView.as_view(), name='user_update'),
     path('users/<int:pk>/activate/', views.user_activate, name='user_activate'),
     path('users/<int:pk>/deactivate/', views.user_deactivate, name='user_deactivate'),

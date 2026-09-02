@@ -164,7 +164,11 @@ class ActivityLog(models.Model):
         ('deactivate', 'Account Deactivated'),
         ('delete', 'User Deleted'),
         ('reset_password', 'Password Reset'),
+        ('change_password', 'Password Changed'),
         ('pc_unlock', 'Lab PC Unlocked'),
+        ('pc_lock', 'Lab PC Locked'),
+        ('pc_shutdown', 'Lab PC Shutdown'),
+        ('pc_restart', 'Lab PC Restarted'),
     ]
     actor = models.ForeignKey(
         settings.AUTH_USER_MODEL,

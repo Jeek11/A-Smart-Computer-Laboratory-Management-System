@@ -17,13 +17,6 @@
   --cr-red:var(--red); --cr-red-tint:var(--red-dim);
   font-family:'Inter',sans-serif; background:var(--cr-bg); color:var(--cr-text);
   margin:-20px; padding:20px; min-height:100%; max-width:100%; box-sizing:border-box;
-  /* This page is opened both as a full page AND inside the app-wide modal
-     (see base.html's .app-modal, fixed at 560px regardless of the actual
-     browser viewport). A @media query alone can't tell those two cases
-     apart, so the 3/2-column grids below stayed cramped whenever the
-     modal was open on a wide screen. Making .cr itself a size container
-     lets the @container rules below respond to how much room THIS
-     element actually has, in both contexts. */
   container-type: inline-size;
   container-name: cr;
 }
@@ -80,13 +73,13 @@
 .cr-table tr:last-child td{border-bottom:none;}
 .cr-empty{color:var(--cr-faint); font-size:13px; text-align:center; padding:20px 0;}
 
-.cr-pagination{display:flex; align-items:center; justify-content:space-between; margin-top:14px; font-size:12.5px; color:var(--cr-dim);}
-.cr-pagination .cr-pages{display:flex; gap:6px;}
+.cr-pagination{display:flex; align-items:center; justify-content:space-between; margin-top:14px; font-size:12.5px; color:var(--cr-dim); flex-wrap:wrap; gap:10px;}
+.cr-pagination .cr-pages{display:flex; gap:6px; align-items:center;}
 .cr-pagination a, .cr-pagination span.cr-page{display:flex; align-items:center; justify-content:center; min-width:28px; height:28px; border-radius:7px; border:1px solid var(--cr-border); color:var(--cr-text); font-size:12.5px;}
 .cr-pagination a:hover{border-color:var(--cr-faint); text-decoration:none;}
-.cr-pagination span.cr-page.current{background:var(--cr-green); border-color:var(--cr-green); color:#0a0e12; font-weight:700;}
-html[data-theme="light"] .cr-pagination span.cr-page.current{ color:#fff; }
-.cr-pagination span.cr-page.disabled{color:var(--cr-faint); border-color:var(--cr-border);}
+.cr-pagination span.cr-page.current{background:var(--cr-blue); border-color:var(--cr-blue); color:#fff; font-weight:700;}
+.cr-pagination span.cr-page.disabled{opacity:.35; pointer-events:none;}
+.cr-per-page{padding:5px 10px; border:1px solid var(--cr-border); border-radius:6px; background:var(--cr-bg); color:var(--cr-text); font-size:12px; font-family:inherit;}
 
 .cr-result-row{display:flex; justify-content:space-between; align-items:center; padding:8px 10px; border:1px solid var(--cr-border); border-radius:8px; margin-bottom:6px;}
 .cr-result-row:last-child{margin-bottom:0;}
@@ -107,10 +100,6 @@ html[data-theme="light"] .cr-add-btn{ color:#fff; }
   .cr-info-grid{grid-template-columns:repeat(2,1fr); gap:8px;}
 }
 
-/* Container-query versions of the same breakpoints, keyed off .cr's own
-   width — these are what actually fire while this page is open inside
-   the app-wide modal, since the modal stays a fixed ~560px regardless of
-   the browser viewport. */
 @container cr (max-width:900px){
   .cr-info-grid{grid-template-columns:repeat(2,1fr);}
 }
@@ -150,7 +139,7 @@ html[data-theme="light"] .cr-add-btn{ color:#fff; }
       {% endif %}
       <a href="{% url 'roster_import_students' roster.pk %}" class="cr-btn">&#8593; Import Students</a>
       <a href="{% url 'roster_edit' roster.pk %}" class="cr-btn js-modal-link">&#9998; Edit Roster</a>
-      {% if roster.has_full_schedule %}
+      {% if roster.has_full_schedule and roster.status == 'active' %}
       <form method="post" action="{% url 'roster_generate_sessions' roster.pk %}"
             onsubmit="event.preventDefault(); compulabConfirmSubmit(this, {title: 'Generate scheduled sessions?', text: 'Creates a reservation-coded session for every date in the validity period that doesn\'t already have one. Safe to run more than once.', icon: 'question', confirmButtonText: 'Yes, generate'}); return false;"
             style="display:inline">
@@ -323,26 +312,36 @@ html[data-theme="light"] .cr-add-btn{ color:#fff; }
 
     {% if sessions_is_paginated %}
       <div class="cr-pagination">
-        <div>
-          Showing {{ sessions_page_obj.start_index }} to {{ sessions_page_obj.end_index }} of {{ sessions_paginator.count }} entries
+        <div style="display:flex; align-items:center; gap:10px;">
+          <span>Showing {{ sessions_page_obj.start_index }} to {{ sessions_page_obj.end_index }} of {{ sessions_paginator.count }} entries</span>
+          <select class="cr-per-page" onchange="crChangeSessionsPerPage(this.value)">
+            <option value="10" {% if sessions_selected_per_page == 10 %}selected{% endif %}>10 per page</option>
+            <option value="15" {% if sessions_selected_per_page == 15 %}selected{% endif %}>15 per page</option>
+            <option value="25" {% if sessions_selected_per_page == 25 %}selected{% endif %}>25 per page</option>
+            <option value="50" {% if sessions_selected_per_page == 50 %}selected{% endif %}>50 per page</option>
+          </select>
         </div>
         <div class="cr-pages">
           {% if sessions_page_obj.has_previous %}
-            <a href="?page={{ sessions_page_obj.previous_page_number }}">&lsaquo;</a>
+            <a href="?page=1" class="js-modal-link">&laquo;</a>
+            <a href="?page={{ sessions_page_obj.previous_page_number }}" class="js-modal-link">&lsaquo;</a>
           {% else %}
+            <span class="cr-page disabled">&laquo;</span>
             <span class="cr-page disabled">&lsaquo;</span>
           {% endif %}
           {% for num in sessions_paginator.page_range %}
             {% if num == sessions_page_obj.number %}
               <span class="cr-page current">{{ num }}</span>
             {% else %}
-              <a href="?page={{ num }}">{{ num }}</a>
+              <a href="?page={{ num }}" class="js-modal-link">{{ num }}</a>
             {% endif %}
           {% endfor %}
           {% if sessions_page_obj.has_next %}
-            <a href="?page={{ sessions_page_obj.next_page_number }}">&rsaquo;</a>
+            <a href="?page={{ sessions_page_obj.next_page_number }}" class="js-modal-link">&rsaquo;</a>
+            <a href="?page={{ sessions_paginator.num_pages }}" class="js-modal-link">&raquo;</a>
           {% else %}
             <span class="cr-page disabled">&rsaquo;</span>
+            <span class="cr-page disabled">&raquo;</span>
           {% endif %}
         </div>
       </div>
@@ -363,6 +362,18 @@ html[data-theme="light"] .cr-add-btn{ color:#fff; }
       text: 'The instructor will be notified and can edit and resubmit it.',
       confirmButtonText: 'Yes, reject',
     });
+  };
+
+  // The "per page" dropdown for the Reservation History list — a plain
+  // <select onchange> like users.html uses on its own full page won't
+  // work here, since this template is only ever loaded INSIDE the
+  // app-wide modal (see accounts/mixins.py: ModalDetailMixin) and a
+  // normal form submit would navigate the whole browser window away
+  // from the roster instead of refreshing the modal's content.
+  window.crChangeSessionsPerPage = function (value) {
+    var base = (typeof appModalSourceUrl !== 'undefined' && appModalSourceUrl) || window.location.href;
+    var url = new URL('?per_page=' + encodeURIComponent(value), base);
+    openAppModal(url.href, null);
   };
 })();
 </script>

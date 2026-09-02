@@ -68,6 +68,30 @@ class RosterStudentCountMixin:
         return cleaned_data
 
 
+class WithinLabHoursMixin:
+    """Rejects a request/session whose start or end time falls outside the
+    selected lab's opening_time–closing_time (see Lab model, set on
+    Manage Labs). Applies to reservations only — Override Check-In and
+    Manual Unlock (labs/views.py) deliberately stay exempt, since those
+    exist specifically to handle situations that fall outside the normal
+    schedule (e.g. a lab in-charge letting someone in early/late)."""
+
+    def clean(self):
+        cleaned_data = super().clean()
+        lab = cleaned_data.get('lab')
+        start_time = cleaned_data.get('start_time')
+        end_time = cleaned_data.get('end_time')
+        if lab and start_time and end_time:
+            if start_time < lab.opening_time or end_time > lab.closing_time:
+                open_lbl = lab.opening_time.strftime('%I:%M %p').lstrip('0')
+                close_lbl = lab.closing_time.strftime('%I:%M %p').lstrip('0')
+                self.add_error(
+                    'start_time',
+                    f'{lab.name} is only open {open_lbl}–{close_lbl}. Pick a time within operating hours.'
+                )
+        return cleaned_data
+
+
 class NoPastDateTimeMixin:
     """Rejects a request whose date + start time has already passed —
     logging (or editing) a reservation for a slot that's already over
@@ -152,7 +176,7 @@ class PcsRequestedRequiredMixin:
         return cleaned_data
 
 
-class SessionForm(RequiresRegisteredAccountMixin, PcsRequestedRequiredMixin, RosterStudentCountMixin, forms.ModelForm):
+class SessionForm(WithinLabHoursMixin, RequiresRegisteredAccountMixin, PcsRequestedRequiredMixin, RosterStudentCountMixin, forms.ModelForm):
     """Used by SessionUpdateView to edit an already-scheduled session."""
     class Meta:
         model = Session
@@ -166,7 +190,7 @@ class SessionForm(RequiresRegisteredAccountMixin, PcsRequestedRequiredMixin, Ros
         self.fields['pcs_requested'].required = False
 
 
-class SessionRequestForm(NoPastDateTimeMixin, RequiresRegisteredAccountMixin, PcsRequestedRequiredMixin, RosterStudentCountMixin, forms.ModelForm):
+class SessionRequestForm(WithinLabHoursMixin, NoPastDateTimeMixin, RequiresRegisteredAccountMixin, PcsRequestedRequiredMixin, RosterStudentCountMixin, forms.ModelForm):
     """Used by RequestCreateView/RequestUpdateView to log or edit a pending request."""
     class Meta:
         model = SessionRequest
@@ -181,7 +205,7 @@ class SessionRequestForm(NoPastDateTimeMixin, RequiresRegisteredAccountMixin, Pc
         self.fields['date'].widget.attrs['min'] = timezone.localdate().isoformat()
 
 
-class InstructorSessionRequestForm(NoPastDateTimeMixin, forms.ModelForm):
+class InstructorSessionRequestForm(WithinLabHoursMixin, NoPastDateTimeMixin, forms.ModelForm):
     """Self-service version of SessionRequestForm for an Instructor booking
     their own class — skips RequiresRegisteredAccountMixin's requester-
     name/ID matching entirely, since the logged-in account IS the
@@ -215,12 +239,16 @@ class ClassRosterForm(forms.ModelForm):
             'schedule_valid_from', 'schedule_valid_until', 'status',
         ]
         widgets = {
+            'course_code': forms.TextInput(attrs={'placeholder': 'e.g. CAP102'}),
+            'subject': forms.TextInput(attrs={'placeholder': 'e.g. Capstone Project 2'}),
+            'section': forms.TextInput(attrs={'placeholder': 'e.g. BSIS-3A'}),
             'academic_year': forms.TextInput(attrs={'placeholder': 'e.g. 2026-2027'}),
             'schedule_start_time': forms.TimeInput(attrs={'type': 'time'}),
             'schedule_end_time': forms.TimeInput(attrs={'type': 'time'}),
             'schedule_valid_from': forms.DateInput(attrs={'type': 'date'}),
             'schedule_valid_until': forms.DateInput(attrs={'type': 'date'}),
         }
+       
         labels = {
             'schedule_valid_from': 'Schedule valid from',
             'schedule_valid_until': 'Schedule valid until',
@@ -230,12 +258,17 @@ class ClassRosterForm(forms.ModelForm):
         super().__init__(*args, **kwargs)
         self.fields['instructor'].queryset = User.objects.filter(role='instructor').order_by('first_name', 'last_name')
         self.fields['instructor'].required = False
+        self.fields['course_code'].required = True
         self.fields['lab'].required = False
         self.fields['schedule_start_time'].required = False
         self.fields['schedule_end_time'].required = False
         self.fields['schedule_valid_from'].required = False
         self.fields['schedule_valid_until'].required = False
         self.fields['schedule_valid_from'].help_text = (
+            
+        )
+        self.fields['schedule_days'].help_text = (
+            'Leave all unchecked if the schedule isn\'t set yet.'
         )
         if self.instance and self.instance.pk and self.instance.schedule_days:
             self.initial['schedule_days'] = self.instance.schedule_days.split(',')
@@ -262,6 +295,15 @@ class ClassRosterForm(forms.ModelForm):
             self.add_error('schedule_valid_until', '"Valid until" must be on or after "valid from".')
         if days and (not cleaned.get('lab')):
             raise forms.ValidationError('Select a laboratory room to auto-generate sessions for this schedule.')
+        if start and end and cleaned.get('lab'):
+            lab = cleaned['lab']
+            if start < lab.opening_time or end > lab.closing_time:
+                open_lbl = lab.opening_time.strftime('%I:%M %p').lstrip('0')
+                close_lbl = lab.closing_time.strftime('%I:%M %p').lstrip('0')
+                self.add_error(
+                    'schedule_end_time',
+                    f'{lab.name} is only open {open_lbl}–{close_lbl}. Adjust the meeting time to fit within operating hours.'
+                )
 
         # Schedule-conflict check — instructor's schedule, the classroom's
         # schedule, and the section's schedule must all be free for this

@@ -139,8 +139,8 @@
         </svg>
       </div>
       <div class="vr-eyebrow ok">Account verification</div>
-      <h2>Email Verified</h2>
-      <p>Your email has been confirmed. You can now log in to your CompuLab account.</p>
+      <h2>{% if password_was_set %}Password Set{% else %}Email Verified{% endif %}</h2>
+      <p>{% if password_was_set %}Your password has been set and your email confirmed. You can now log in with it.{% else %}Your email has been confirmed. You can now log in to your CompuLab account.{% endif %}</p>
       <a href="{% url 'login' %}" class="vr-btn">
         Go to Login
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">

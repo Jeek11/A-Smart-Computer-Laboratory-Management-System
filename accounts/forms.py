@@ -117,17 +117,30 @@ class AdminUserCreateForm(forms.ModelForm):
             p2 = cleaned.get('password2')
             if not email:
                 self.add_error('email', 'Email is required for this role.')
-            if not p1:
-                self.add_error('password1', 'Password is required for this role.')
-            if not p2:
-                self.add_error('password2', 'Please confirm the password.')
-            if p1 and p2 and p1 != p2:
-                self.add_error('password2', "Passwords don't match.")
-            if p1:
-                try:
-                    validate_password(p1)
-                except ValidationError as e:
-                    self.add_error('password1', e)
+
+            if role in ('incharge', 'instructor'):
+                # No password is set here at all — this account is created
+                # with set_unusable_password() (see save()) and the new
+                # Lab In-Charge/Instructor sets their OWN password by
+                # clicking the verification link emailed to them (see
+                # verify_email view's "first-time activation" branch).
+                # Nobody else — not even the admin creating the account —
+                # ever knows it.
+                cleaned['password1'] = ''
+                cleaned['password2'] = ''
+            else:
+                # Admin accounts still go through admin-sets-password.
+                if not p1:
+                    self.add_error('password1', 'Password is required for this role.')
+                if not p2:
+                    self.add_error('password2', 'Please confirm the password.')
+                if p1 and p2 and p1 != p2:
+                    self.add_error('password2', "Passwords don't match.")
+                if p1:
+                    try:
+                        validate_password(p1)
+                    except ValidationError as e:
+                        self.add_error('password1', e)
 
             # Admin and Lab In-Charge accounts don't use Department/Year
             # Level/Student ID at all — clear out anything left over from
@@ -158,9 +171,13 @@ class AdminUserCreateForm(forms.ModelForm):
 
     def save(self, commit=True):
         user = super().save(commit=False)
-        if user.role == 'student':
-            # Students never authenticate with a Django password — this
-            # also makes the login form reject any guess outright.
+        if user.role in ('student', 'incharge', 'instructor'):
+            # Students never authenticate with a Django password at all.
+            # Incharge/Instructor accounts start unusable too — on
+            # purpose, not a bug: they set their own real password the
+            # first time they click the emailed verification link (see
+            # verify_email view), instead of the admin choosing one for
+            # them.
             user.set_unusable_password()
         else:
             user.set_password(self.cleaned_data['password1'])
@@ -209,6 +226,13 @@ class AdminUserUpdateForm(forms.ModelForm):
         self.fields['email'].required = False
         self.fields['password1'].widget.attrs['autocomplete'] = 'new-password'
         self.fields['password2'].widget.attrs['autocomplete'] = 'new-password'
+        # Captured before anything on this form can touch self.instance,
+        # so save() below can tell whether email actually changed — by
+        # the time save() runs, Django's ModelForm machinery has already
+        # applied the new value onto self.instance.email, so comparing
+        # against self.instance there would just compare the new value to
+        # itself.
+        self._original_email = self.instance.email if self.instance.pk else None
 
     def clean(self):
         cleaned = super().clean()
@@ -278,9 +302,95 @@ class AdminUserUpdateForm(forms.ModelForm):
             user.set_unusable_password()
         elif user.role != 'student' and self.cleaned_data.get('password1'):
             user.set_password(self.cleaned_data['password1'])
+
+        # Changing the email to something new means nobody has proven
+        # they actually own THAT address yet — the old verification only
+        # covers the old address. Reset the flag so login.is blocked
+        # again (see LoginView.form_valid's email_verified check) until
+        # a fresh verification link (sent by the view, since that needs
+        # `request`) is clicked. self.email_changed is read by
+        # UserUpdateView.form_valid() to decide whether to send that link.
+        self.email_changed = bool(self._original_email) and user.email and user.email != self._original_email
+        if self.email_changed:
+            user.email_verified = False
+
         if commit:
             user.save()
         return user
+
+
+class SetPasswordOnVerifyForm(forms.Form):
+    """First-time activation for a Lab In-Charge/Instructor account
+    created with no password (see AdminUserCreateForm.save()) — shown by
+    the verify_email view INSTEAD of the plain verify-and-done flow when
+    the account has no usable password yet, so the account owner sets
+    their OWN password the first time they click the emailed
+    verification link, rather than the admin who created the account
+    ever choosing/knowing it."""
+    password1 = forms.CharField(label='Password', widget=forms.PasswordInput)
+    password2 = forms.CharField(label='Confirm password', widget=forms.PasswordInput)
+
+    def __init__(self, user, *args, **kwargs):
+        self.user = user
+        super().__init__(*args, **kwargs)
+
+    def clean(self):
+        cleaned = super().clean()
+        p1 = cleaned.get('password1')
+        p2 = cleaned.get('password2')
+        if p1 and p2 and p1 != p2:
+            self.add_error('password2', "Passwords don't match.")
+        if p1:
+            try:
+                validate_password(p1, user=self.user)
+            except ValidationError as e:
+                self.add_error('password1', e)
+        return cleaned
+
+
+class ProfilePasswordChangeForm(forms.Form):
+    """Lets a logged-in user (Admin/Lab In-Charge/Instructor) change their
+    own password from the My Profile page. Unlike AdminSetPasswordForm
+    (admin resetting someone else's password blind), this requires the
+    user's CURRENT password first — proving you already know the old one
+    is the safeguard for a self-service change. Students never reach this
+    form: they have no dashboard password to change (see AdminUserCreateForm)."""
+    current_password = forms.CharField(label='Current password', widget=forms.PasswordInput)
+    password1 = forms.CharField(label='New password', widget=forms.PasswordInput)
+    password2 = forms.CharField(label='Confirm new password', widget=forms.PasswordInput)
+
+    def __init__(self, *args, user=None, **kwargs):
+        self.user = user
+        super().__init__(*args, **kwargs)
+        self.fields['current_password'].widget.attrs['autocomplete'] = 'current-password'
+        self.fields['password1'].widget.attrs['autocomplete'] = 'new-password'
+        self.fields['password2'].widget.attrs['autocomplete'] = 'new-password'
+
+    def clean_current_password(self):
+        current_password = self.cleaned_data.get('current_password')
+        if current_password and not self.user.check_password(current_password):
+            raise ValidationError('Your current password is incorrect.')
+        return current_password
+
+    def clean(self):
+        cleaned = super().clean()
+        p1 = cleaned.get('password1')
+        p2 = cleaned.get('password2')
+        if p1 and p2 and p1 != p2:
+            self.add_error('password2', "Passwords don't match.")
+        if p1:
+            try:
+                validate_password(p1, user=self.user)
+            except ValidationError as e:
+                self.add_error('password1', e)
+            if cleaned.get('current_password') and p1 == cleaned.get('current_password'):
+                self.add_error('password1', 'New password must be different from your current password.')
+        return cleaned
+
+    def save(self):
+        self.user.set_password(self.cleaned_data['password1'])
+        self.user.save(update_fields=['password'])
+        return self.user
 
 
 class StudentImportForm(forms.Form):

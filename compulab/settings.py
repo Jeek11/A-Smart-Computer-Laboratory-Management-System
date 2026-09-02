@@ -265,9 +265,15 @@ STALE_PC_GRACE_MINUTES = 15
 STALE_PC_FALLBACK_HOURS = 4
 
 # Hour (0-23, local time / Asia/Manila) that PCActivityLog gets backed up
-# to media/activity_log_backups/*.xlsx and then fully wiped every day.
+# to media/activity_log_backups/*.xlsx and then fully wiped.
 # Change to e.g. 3 to run at 3 AM instead of midnight.
 PC_ACTIVITY_LOG_WIPE_HOUR = 0
+
+# Leave as None to wipe every day (original behavior). Set to an integer
+# 0-6 (0=Monday, 1=Tuesday, ... 6=Sunday) to wipe only once a week, on
+# that weekday, at PC_ACTIVITY_LOG_WIPE_HOUR instead. Example: wipe every
+# Sunday at midnight -> PC_ACTIVITY_LOG_WIPE_WEEKDAY = 6
+PC_ACTIVITY_LOG_WIPE_WEEKDAY = None
 
 # --- Cloud sync (edge server pushes to a remote cloud server when
 # online; everything above keeps working with this left blank) ---
