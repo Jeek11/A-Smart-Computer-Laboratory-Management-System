@@ -1,0 +1,10 @@
+{% comment %}
+"Select all" for the Issues lists. Pair it with data-select-reveal on the
+.js-bulk-delete wrapper (see static/js/bulk-delete.js): the row checkboxes
+stay hidden until this is ticked.
+{% endcomment %}
+<label class="issue-selectall"><input type="checkbox" class="js-select-all"> Select all</label>
+<style>
+  .issue-selectall { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; cursor: pointer; margin: 0 0 10px; user-select: none; }
+  .issue-selectall input { width: 16px; height: 16px; cursor: pointer; accent-color: var(--red); }
+</style>
